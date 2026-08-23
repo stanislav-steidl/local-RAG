@@ -60,6 +60,9 @@ llm = [
 dev = [
     "pytest>=8.2",
     "pytest-cov>=5.0",
+    # Generates synthetic PDFs for the parser tests. Test-only: nothing in
+    # src/ imports it, and no real document is ever used as a fixture.
+    "reportlab>=4.2",
     "ruff>=0.5",
     "black>=24.4",
     "mypy>=1.10",
@@ -132,6 +135,7 @@ ignore = [
     "D103",    # test function names are the documentation
     "PLR2004", # magic values are fine in assertions
     "TC",      # deferring typing-only imports buys nothing in a test module
+    "ARG002",  # fake implementations must match an interface they do not use
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -165,6 +169,7 @@ module = [
     "pytesseract.*",
     "pdf2image.*",
     "ollama.*",
+    "reportlab.*",
 ]
 ignore_missing_imports = true
 
