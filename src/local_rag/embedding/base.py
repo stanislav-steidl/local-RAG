@@ -224,6 +224,20 @@ class Embedder(ABC):
                 f"embedder declares dimension {self.dimension}"
             )
 
+        # `supports_sparse` is a capability the store is configured from, so it
+        # has to describe what the backend actually returns. Advertising sparse
+        # while returning none leaves hybrid search with no lexical side and no
+        # indication why; returning sparse while advertising none has it
+        # silently discarded. A partial result is incoherent either way.
+        disagreeing = sum(
+            (embedding.sparse is not None) != self.supports_sparse for embedding in embeddings
+        )
+        if disagreeing:
+            raise RuntimeError(
+                f"backend declares supports_sparse={self.supports_sparse} but "
+                f"{disagreeing} of {len(embeddings)} embeddings disagree"
+            )
+
         return embeddings
 
     def embed_query(self, text: str) -> Embedding:

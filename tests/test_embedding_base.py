@@ -60,6 +60,48 @@ class MisdeclaredWidthEmbedder(RecordingEmbedder):
         return self._width + 1
 
 
+class SparseClaimingEmbedder(RecordingEmbedder):
+    """Advertises sparse support but returns dense-only embeddings."""
+
+    @property
+    def supports_sparse(self) -> bool:
+        return True
+
+
+class UndeclaredSparseEmbedder(RecordingEmbedder):
+    """Returns sparse vectors without advertising them."""
+
+    def _embed_batch(self, texts: Sequence[str]) -> list[Embedding]:
+        return [
+            Embedding(dense=embedding.dense, sparse=SparseVector(indices=(1,), values=(0.5,)))
+            for embedding in super()._embed_batch(texts)
+        ]
+
+
+class PartiallySparseEmbedder(SparseClaimingEmbedder):
+    """Attaches a sparse vector to only some of its embeddings."""
+
+    def _embed_batch(self, texts: Sequence[str]) -> list[Embedding]:
+        produced = RecordingEmbedder._embed_batch(self, texts)
+        return [
+            Embedding(
+                dense=embedding.dense,
+                sparse=SparseVector(indices=(1,), values=(0.5,)) if index % 2 == 0 else None,
+            )
+            for index, embedding in enumerate(produced)
+        ]
+
+
+class HybridEmbedder(SparseClaimingEmbedder):
+    """Advertises sparse support and delivers it, as a backend should."""
+
+    def _embed_batch(self, texts: Sequence[str]) -> list[Embedding]:
+        return [
+            Embedding(dense=embedding.dense, sparse=SparseVector(indices=(1,), values=(0.5,)))
+            for embedding in RecordingEmbedder._embed_batch(self, texts)
+        ]
+
+
 class TestSparseVector:
     def test_defaults_to_empty(self) -> None:
         vector = SparseVector()
@@ -233,6 +275,37 @@ class TestBackendGuards:
     def test_an_empty_request_skips_the_width_checks(self) -> None:
         """No embeddings means nothing to disagree about."""
         assert MisdeclaredWidthEmbedder(width=3).embed_documents([]) == []
+
+
+class TestSparseCapabilityGuards:
+    """The store is configured from ``supports_sparse``, so it must be truthful."""
+
+    def test_claiming_sparse_without_producing_it_is_caught(self) -> None:
+        """Hybrid search would lose its lexical side with nothing to explain why."""
+        with pytest.raises(RuntimeError, match="supports_sparse=True but 2 of 2"):
+            SparseClaimingEmbedder().embed_documents(["a", "b"])
+
+    def test_producing_sparse_without_declaring_it_is_caught(self) -> None:
+        """The lexical data would be silently discarded downstream."""
+        with pytest.raises(RuntimeError, match="supports_sparse=False but 2 of 2"):
+            UndeclaredSparseEmbedder().embed_documents(["a", "b"])
+
+    def test_a_partial_sparse_result_is_caught(self) -> None:
+        with pytest.raises(RuntimeError, match="supports_sparse=True but 2 of 4"):
+            PartiallySparseEmbedder().embed_documents(["a", "b", "c", "d"])
+
+    def test_a_consistent_hybrid_backend_is_accepted(self) -> None:
+        embeddings = HybridEmbedder().embed_documents(["a", "b"])
+
+        assert all(embedding.sparse is not None for embedding in embeddings)
+
+    def test_a_consistent_dense_backend_is_accepted(self) -> None:
+        embeddings = RecordingEmbedder().embed_documents(["a", "b"])
+
+        assert all(embedding.sparse is None for embedding in embeddings)
+
+    def test_an_empty_request_skips_the_capability_check(self) -> None:
+        assert SparseClaimingEmbedder().embed_documents([]) == []
 
 
 class TestQueryEmbedding:
