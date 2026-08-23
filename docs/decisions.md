@@ -78,8 +78,11 @@ scale the hand-written pipeline is a few hundred lines.
 adopting it later is an adapter layer rather than a rewrite:
 
 - chunks carry a `page_content` + `metadata` shape, matching `langchain_core.documents.Document`;
-- the embedder exposes `embed_documents()` / `embed_query()`, matching
-  `langchain_core.embeddings.Embeddings`;
+- the embedder exposes `embed_documents()` / `embed_query()`, matching the method names and
+  call shapes of `langchain_core.embeddings.Embeddings`. It returns `Embedding` objects rather
+  than bare `list[float]`, because BGE-M3 produces a sparse vector alongside the dense one and
+  discarding it at the interface would throw away the exact-term matching this corpus needs.
+  A LangChain adapter therefore projects to `.dense` — a one-line map, not a redesign;
 - LanceDB and Ollama both have first-party LangChain integrations, so the store and LLM become
   configuration changes.
 
