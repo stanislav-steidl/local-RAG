@@ -1,0 +1,271 @@
+"""The embedding abstraction: vector types and the interface backends implement.
+
+Embedding is the one pipeline stage with a genuinely heavyweight dependency —
+PyTorch, and a model measured in gigabytes. Defining the contract separately
+from any backend is what keeps the rest of the pipeline testable without either:
+retrieval, indexing and the CLI depend on :class:`Embedder`, and a test can
+substitute a deterministic fake.
+
+Two vectors, not one. BGE-M3 emits a dense vector capturing meaning and a
+sparse one capturing which terms actually occur. Dense retrieval alone
+reliably misses exact tokens — a contract number, an account ID, a surname —
+which is precisely what someone searching a document archive tends to type.
+Carrying both from the outset is what makes hybrid search possible later
+without reshaping the interface.
+"""
+
+from __future__ import annotations
+
+import math
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+
+__all__ = ["DEFAULT_BATCH_SIZE", "Embedder", "Embedding", "SparseVector"]
+
+#: Texts embedded per backend call. Small because the target machine is
+#: CPU-bound; the value is a constructor argument for hardware that is not.
+DEFAULT_BATCH_SIZE = 8
+
+
+@dataclass(frozen=True, slots=True)
+class SparseVector:
+    """Term weights for lexical matching, stored as parallel index/value arrays.
+
+    Only non-zero entries are held: a sparse vector over a 250k-token vocabulary
+    typically has a few dozen. The arrays are parallel rather than a mapping so
+    they translate directly into the columnar layout the vector store expects.
+
+    Attributes:
+        indices: Vocabulary positions with a non-zero weight.
+        values: The weight at each corresponding index.
+    """
+
+    indices: tuple[int, ...] = ()
+    values: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate that the two arrays describe a coherent vector."""
+        if len(self.indices) != len(self.values):
+            raise ValueError(
+                f"indices and values must be parallel, got {len(self.indices)} and "
+                f"{len(self.values)}"
+            )
+        if any(index < 0 for index in self.indices):
+            raise ValueError("indices must be non-negative")
+        if len(set(self.indices)) != len(self.indices):
+            raise ValueError("indices must be unique")
+        # Checked for the same reason as the dense vector: a non-finite weight
+        # propagates through lexical scoring and poisons every hybrid ranking
+        # it touches, rather than degrading one result.
+        if any(not math.isfinite(value) for value in self.values):
+            raise ValueError("values must not contain NaN or infinity")
+        # Storing a zero weight would contradict the type's own invariant and
+        # make len() report a term that carries no information. Backends whose
+        # output may contain zeros should build through from_mapping().
+        if any(value == 0.0 for value in self.values):
+            raise ValueError("values must be non-zero; use from_mapping() to drop empty weights")
+
+    @classmethod
+    def from_mapping(cls, weights: Mapping[int, float]) -> SparseVector:
+        """Build from a term-to-weight mapping, discarding zero weights.
+
+        Models express lexical weights as a mapping and may include zeros for
+        tokens that ended up contributing nothing. Dropping them here keeps the
+        strict constructor strict while giving backends a total function to
+        call.
+
+        Args:
+            weights: Vocabulary index to weight.
+
+        Returns:
+            A vector holding only the non-zero terms, ordered by index so that
+            two equal vectors compare equal.
+        """
+        kept = sorted((index, value) for index, value in weights.items() if value != 0.0)
+        return cls(
+            indices=tuple(index for index, _ in kept),
+            values=tuple(value for _, value in kept),
+        )
+
+    def __len__(self) -> int:
+        """Number of non-zero terms."""
+        return len(self.indices)
+
+    def as_mapping(self) -> dict[int, float]:
+        """Return the vector as an index-to-weight mapping."""
+        return dict(zip(self.indices, self.values, strict=True))
+
+
+@dataclass(frozen=True, slots=True)
+class Embedding:
+    """One text's vector representation.
+
+    Attributes:
+        dense: The semantic vector.
+        sparse: Term weights, when the backend produces them. ``None`` means
+            the backend is dense-only, which is different from a sparse vector
+            that happens to be empty.
+    """
+
+    dense: tuple[float, ...]
+    sparse: SparseVector | None = None
+
+    def __post_init__(self) -> None:
+        """Validate that the dense vector is usable for similarity search."""
+        if not self.dense:
+            raise ValueError("dense vector must not be empty")
+        if any(not math.isfinite(value) for value in self.dense):
+            raise ValueError("dense vector must not contain NaN or infinity")
+        # Cosine similarity divides by the vector's magnitude, so an all-zero
+        # vector has no defined similarity to anything. Storing one would put a
+        # row in the index that cannot be ranked, not one that ranks poorly.
+        if not any(self.dense):
+            raise ValueError("dense vector must have non-zero magnitude")
+
+    @property
+    def dimension(self) -> int:
+        """Length of the dense vector."""
+        return len(self.dense)
+
+
+class Embedder(ABC):
+    """Turns text into vectors.
+
+    Subclasses implement :meth:`_embed_batch` for a single backend call; this
+    class handles batching, empty input, and verifying that the backend
+    returned what it was asked for.
+
+    ``embed_documents`` and ``embed_query`` mirror LangChain's ``Embeddings``
+    interface so that adopting it later is an adapter rather than a rewrite.
+    They exist as separate methods even where a model treats both identically —
+    BGE-M3 does — because other models do not: the E5 family, for instance,
+    requires ``query:`` and ``passage:`` prefixes, and a caller must not have to
+    know which kind of model sits behind the interface.
+    """
+
+    def __init__(self, *, batch_size: int = DEFAULT_BATCH_SIZE) -> None:
+        """Configure batching.
+
+        Args:
+            batch_size: Texts passed to the backend per call.
+
+        Raises:
+            ValueError: If ``batch_size`` is not positive.
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        self._batch_size = batch_size
+
+    @property
+    def batch_size(self) -> int:
+        """Texts passed to the backend per call."""
+        return self._batch_size
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        """Length of the dense vectors this embedder produces."""
+
+    @property
+    def supports_sparse(self) -> bool:
+        """Whether this embedder also produces term weights."""
+        return False
+
+    @abstractmethod
+    def _embed_batch(self, texts: Sequence[str]) -> list[Embedding]:
+        """Embed one batch.
+
+        Args:
+            texts: Non-empty batch, no larger than :attr:`batch_size`.
+
+        Returns:
+            One embedding per input text, in the same order.
+        """
+
+    def embed_documents(self, texts: Sequence[str]) -> list[Embedding]:
+        """Embed texts for storage in the index.
+
+        Args:
+            texts: Texts to embed. May be empty. Must be a collection of
+                strings rather than a single string.
+
+        Returns:
+            One embedding per input text, in input order.
+
+        Raises:
+            TypeError: If ``texts`` is itself a string. A ``str`` satisfies
+                ``Sequence[str]``, so the call would otherwise succeed and
+                embed the text one character at a time.
+            RuntimeError: If the backend breaks its contract, in any of three
+                ways with distinct consequences. Returning a different number
+                of embeddings than it was given misaligns every chunk after the
+                gap, surfacing much later as retrieval that confidently returns
+                the wrong document. Returning widths that are inconsistent, or
+                that disagree with :attr:`dimension`, produces vectors the store
+                cannot hold. Returning sparse presence that contradicts
+                :attr:`supports_sparse` either leaves hybrid search without a
+                lexical side or has that data silently discarded.
+        """
+        if isinstance(texts, str):
+            raise TypeError(
+                "embed_documents expects a collection of texts, not a single string; "
+                "pass [text] to embed one document"
+            )
+
+        embeddings: list[Embedding] = []
+        for batch in self._batches(texts):
+            produced = self._embed_batch(batch)
+            if len(produced) != len(batch):
+                raise RuntimeError(
+                    f"backend returned {len(produced)} embeddings for {len(batch)} texts"
+                )
+            embeddings.extend(produced)
+
+        widths = {embedding.dimension for embedding in embeddings}
+        if len(widths) > 1:
+            raise RuntimeError(f"backend returned mixed dense widths: {sorted(widths)}")
+        # Uniform width is not enough: it must also be the width this embedder
+        # advertises, since the vector store is configured from `dimension`
+        # before a single embedding is written. A backend that consistently
+        # disagrees would otherwise be caught only at insert time.
+        if widths and widths != {self.dimension}:
+            raise RuntimeError(
+                f"backend returned {next(iter(widths))}-dimensional vectors but this "
+                f"embedder declares dimension {self.dimension}"
+            )
+
+        # `supports_sparse` is a capability the store is configured from, so it
+        # has to describe what the backend actually returns. Advertising sparse
+        # while returning none leaves hybrid search with no lexical side and no
+        # indication why; returning sparse while advertising none has it
+        # silently discarded. A partial result is incoherent either way.
+        disagreeing = sum(
+            (embedding.sparse is not None) != self.supports_sparse for embedding in embeddings
+        )
+        if disagreeing:
+            raise RuntimeError(
+                f"backend declares supports_sparse={self.supports_sparse} but "
+                f"{disagreeing} of {len(embeddings)} embeddings disagree"
+            )
+
+        return embeddings
+
+    def embed_query(self, text: str) -> Embedding:
+        """Embed a single search query.
+
+        Args:
+            text: The query.
+
+        Returns:
+            Its embedding.
+        """
+        return self.embed_documents([text])[0]
+
+    def _batches(self, texts: Sequence[str]) -> Iterator[Sequence[str]]:
+        """Split ``texts`` into slices of at most :attr:`batch_size`."""
+        for offset in range(0, len(texts), self._batch_size):
+            yield texts[offset : offset + self._batch_size]
