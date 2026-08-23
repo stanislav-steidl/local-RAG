@@ -134,9 +134,9 @@ protected: every change arrives through a feature branch and must be green befor
 ## Roadmap
 
 - [x] Project scaffold, tooling, CI
-- [ ] Document model and configuration
-- [ ] Ingestion: PDF, DOCX, plain text
-- [ ] Chunking
+- [x] Document model and configuration
+- [x] Ingestion: PDF, DOCX, plain text
+- [x] Chunking
 - [ ] BGE-M3 embeddings
 - [ ] LanceDB index and hybrid retrieval
 - [ ] Search CLI
