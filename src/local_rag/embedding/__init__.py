@@ -14,9 +14,11 @@ from local_rag.embedding.base import (
     Embedding,
     SparseVector,
 )
+from local_rag.embedding.bge_m3 import BgeM3Embedder
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
+    "BgeM3Embedder",
     "Embedder",
     "Embedding",
     "SparseVector",

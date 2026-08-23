@@ -11,6 +11,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
 
+from local_rag.errors import LocalRagError
+from local_rag.errors import MissingDependencyError as _SharedMissingDependencyError
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -25,7 +28,7 @@ __all__ = [
 ]
 
 
-class IngestionError(Exception):
+class IngestionError(LocalRagError):
     """Base class for every failure raised while ingesting a document."""
 
 
@@ -42,8 +45,13 @@ class DocumentParseError(IngestionError):
     """
 
 
-class MissingDependencyError(IngestionError):
+class MissingDependencyError(IngestionError, _SharedMissingDependencyError):
     """Raised when a parser's optional dependency is not installed.
+
+    Inherits from both the ingestion hierarchy and the package-wide
+    :class:`~local_rag.errors.MissingDependencyError`, so existing handlers
+    that catch :class:`IngestionError` keep working while a caller spanning
+    several stages can catch a missing dependency in one place.
 
     Parsing libraries live behind the ``parsing`` extra, so importing
     :mod:`local_rag.ingest` must not require them. The failure is therefore
