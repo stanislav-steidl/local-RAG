@@ -30,6 +30,7 @@ from local_rag.ingest.scanner import (
     compute_content_hash,
     iter_source_files,
     scan_corpus,
+    validate_corpus_root,
 )
 
 __all__ = [
@@ -53,4 +54,5 @@ __all__ = [
     "load_corpus",
     "load_document",
     "scan_corpus",
+    "validate_corpus_root",
 ]

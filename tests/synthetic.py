@@ -29,15 +29,22 @@ def make_pdf(path: Path, pages: list[str]) -> Path:
 
     Args:
         path: Destination file.
-        pages: Text to draw on each page, in order.
+        pages: Text to draw on each page, in order. Keep this ASCII — see the
+            note below on font limitations.
 
     Returns:
         ``path``, for convenient chaining.
+
+    Note:
+        Helvetica is a built-in Type 1 font with no glyphs for Czech
+        diacritics, and embedding a Unicode TrueType font would mean shipping a
+        font file in the repository. PDF fixtures therefore stay ASCII. Czech
+        text is covered where it can be exercised honestly — the plain-text
+        parser's cp1250 fallback and the DOCX parser, neither of which has this
+        limitation.
     """
     pdf = canvas.Canvas(str(path), pagesize=A4)
     for text in pages:
-        # Helvetica has no glyphs for Czech diacritics; the default encoding
-        # would silently substitute them. Draw with a Unicode-capable font.
         pdf.setFont("Helvetica", 12)
         pdf.drawString(72, 750, text)
         pdf.showPage()

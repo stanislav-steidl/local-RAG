@@ -33,6 +33,7 @@ __all__ = [
     "compute_content_hash",
     "iter_source_files",
     "scan_corpus",
+    "validate_corpus_root",
 ]
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,26 @@ def iter_source_files(
             yield path
 
 
+def validate_corpus_root(root: Path) -> None:
+    """Check that ``root`` is a usable corpus directory.
+
+    Every entry point validates through here, so a mistyped corpus path fails
+    with a clear error rather than silently producing an empty scan — ``os.walk``
+    on a missing directory yields nothing at all.
+
+    Args:
+        root: Directory to check.
+
+    Raises:
+        FileNotFoundError: If ``root`` does not exist.
+        NotADirectoryError: If ``root`` is not a directory.
+    """
+    if not root.exists():
+        raise FileNotFoundError(f"corpus root does not exist: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"corpus root is not a directory: {root}")
+
+
 def build_document_metadata(path: Path, root: Path) -> DocumentMetadata:
     """Describe a single file using only what the filesystem reports.
 
@@ -166,9 +187,14 @@ def build_document_metadata(path: Path, root: Path) -> DocumentMetadata:
         OSError: If the file cannot be read or inspected.
         ValueError: If ``path`` is not located beneath ``root``.
     """
+    # Establish that the file belongs to the corpus before touching the
+    # filesystem, so an outside path always reports ValueError rather than
+    # surfacing an OSError — or disclosing whether it exists at all.
+    relative_path = path.relative_to(root).as_posix()
+
     stat_result = path.stat()
     return DocumentMetadata(
-        relative_path=path.relative_to(root).as_posix(),
+        relative_path=relative_path,
         source_type=classify_source_type(path.suffix),
         file_extension=path.suffix.lower(),
         size_bytes=stat_result.st_size,
@@ -200,10 +226,7 @@ def scan_corpus(
         FileNotFoundError: If ``root`` does not exist.
         NotADirectoryError: If ``root`` is not a directory.
     """
-    if not root.exists():
-        raise FileNotFoundError(f"corpus root does not exist: {root}")
-    if not root.is_dir():
-        raise NotADirectoryError(f"corpus root is not a directory: {root}")
+    validate_corpus_root(root)
 
     for path in iter_source_files(root, extensions=extensions):
         try:

@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING
 
 from local_rag.ingest.base import IngestionError, UnsupportedFormatError
 from local_rag.ingest.registry import default_registry
-from local_rag.ingest.scanner import build_document_metadata, iter_source_files
+from local_rag.ingest.scanner import (
+    build_document_metadata,
+    iter_source_files,
+    validate_corpus_root,
+)
 from local_rag.models import ExtractedDocument
 
 if TYPE_CHECKING:
@@ -82,7 +86,12 @@ def load_corpus(
 
     Yields:
         One loaded document per readable, parseable file, in scan order.
+
+    Raises:
+        FileNotFoundError: If ``root`` does not exist.
+        NotADirectoryError: If ``root`` is not a directory.
     """
+    validate_corpus_root(root)
     resolved = registry if registry is not None else default_registry()
 
     for path in iter_source_files(root, extensions=resolved.supported_extensions):

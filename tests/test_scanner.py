@@ -219,6 +219,18 @@ class TestBuildDocumentMetadata:
         with pytest.raises(ValueError, match=r"elsewhere\.pdf"):
             build_document_metadata(outside, corpus)
 
+    def test_outside_path_is_rejected_before_the_filesystem_is_touched(
+        self, corpus: Path, tmp_path: Path
+    ) -> None:
+        """Containment is checked first, so the error never depends on the file existing.
+
+        Statting first would report OSError for a non-existent outside path
+        instead of the documented ValueError, and would disclose whether a path
+        beyond the corpus exists.
+        """
+        with pytest.raises(ValueError, match=r"absent\.pdf"):
+            build_document_metadata(tmp_path / "absent.pdf", corpus)
+
 
 class TestScanCorpus:
     def test_describes_every_file(self, corpus: Path) -> None:

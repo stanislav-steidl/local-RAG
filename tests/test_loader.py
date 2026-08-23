@@ -157,6 +157,23 @@ class TestLoadCorpus:
     def test_empty_corpus_yields_nothing(self, corpus: Path, registry: ParserRegistry) -> None:
         assert list(load_corpus(corpus, registry)) == []
 
+    def test_missing_root_raises_rather_than_yielding_nothing(
+        self, tmp_path: Path, registry: ParserRegistry
+    ) -> None:
+        """A mistyped corpus path must fail, not silently index zero documents.
+
+        os.walk over a missing directory yields nothing at all, so without an
+        explicit check the caller cannot tell an empty corpus from a wrong path.
+        """
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            list(load_corpus(tmp_path / "absent", registry))
+
+    def test_root_that_is_a_file_raises(self, corpus: Path, registry: ParserRegistry) -> None:
+        path = touch(corpus, "a.paged")
+
+        with pytest.raises(NotADirectoryError, match="not a directory"):
+            list(load_corpus(path, registry))
+
     def test_is_lazy(self, corpus: Path, registry: ParserRegistry) -> None:
         """A multi-gigabyte corpus must never be materialised in memory."""
         touch(corpus, "a.paged")
