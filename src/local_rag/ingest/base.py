@@ -69,7 +69,7 @@ class DocumentParser(ABC):
 
     @abstractmethod
     def parse(self, path: Path) -> tuple[PageText, ...]:
-        """Extract text from ``path``.
+        r"""Extract text from ``path``.
 
         An empty result is a legitimate outcome, not an error: a scanned
         document has pages that contain no extractable text, and recognising
@@ -80,7 +80,10 @@ class DocumentParser(ABC):
 
         Returns:
             One :class:`~local_rag.models.PageText` per page, in reading order.
-            Unpaginated formats return a single entry numbered 1.
+            Unpaginated formats return a single entry numbered 1. Text must use
+            ``\n`` line endings; every implementation normalises CRLF and lone
+            CR so that later stages need recognise only one spelling of a line
+            break.
 
         Raises:
             DocumentParseError: If the file cannot be parsed.

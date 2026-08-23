@@ -28,6 +28,24 @@ logger = logging.getLogger(__name__)
 _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1250", "latin-1")
 
 
+def normalise_newlines(text: str) -> str:
+    r"""Convert CRLF and lone CR line endings to LF.
+
+    Every parser emits LF-only text so that downstream stages need to recognise
+    exactly one spelling of a line break. Chunking cares in particular: a
+    paragraph break written ``\r\n\r\n`` does not contain ``\n\n``, so without
+    normalisation a Windows text file would lose its paragraph boundaries to
+    mere line boundaries.
+
+    Args:
+        text: Text to normalise.
+
+    Returns:
+        The text with all line endings expressed as ``\n``.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class TextParser(DocumentParser):
     """Reads plain-text formats, tolerating legacy encodings."""
 
@@ -62,7 +80,7 @@ class TextParser(DocumentParser):
                 continue
             if encoding != _TEXT_ENCODINGS[0]:
                 logger.debug("Decoded %s as %s", path, encoding)
-            return (PageText(page_number=1, text=text),)
+            return (PageText(page_number=1, text=normalise_newlines(text)),)
 
         # Unreachable while latin-1 remains last: it decodes any byte sequence.
         # Kept so that removing it from _TEXT_ENCODINGS fails loudly instead of
@@ -104,7 +122,10 @@ class PdfParser(DocumentParser):
         try:
             with pdfplumber.open(path) as pdf:
                 return tuple(
-                    PageText(page_number=number, text=page.extract_text() or "")
+                    PageText(
+                        page_number=number,
+                        text=normalise_newlines(page.extract_text() or ""),
+                    )
                     for number, page in enumerate(pdf.pages, start=1)
                 )
         except Exception as error:  # pdfplumber raises a variety of low-level errors
@@ -154,7 +175,7 @@ class DocxParser(DocumentParser):
         except Exception as error:  # python-docx raises package-specific errors
             raise DocumentParseError(f"cannot parse DOCX {path}: {error}") from error
 
-        text = "\n".join(block for block in blocks if block.strip())
+        text = "\n".join(normalise_newlines(block) for block in blocks if block.strip())
         if not text:
             return ()
         return (PageText(page_number=1, text=text),)

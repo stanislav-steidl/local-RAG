@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from itertools import pairwise
+from typing import ClassVar
 
 import pytest
 
-from local_rag.chunking import PAGE_SEPARATOR, chunk_document, iter_chunk_spans
+from local_rag.chunking import (
+    PAGE_SEPARATOR,
+    _page_for_offset,
+    chunk_document,
+    iter_chunk_spans,
+)
 from local_rag.models import ExtractedDocument, PageText
 
 from .conftest import make_document_metadata
@@ -159,6 +165,85 @@ class TestBoundaryAwareness:
 
         assert first == "Hi.\n\n" + "x" * 15
         assert first.endswith("x")
+
+
+class TestPageForOffset:
+    """Direct tests for the binary search behind page attribution.
+
+    Exercised directly because a linear scan was replaced with ``bisect``, and
+    off-by-one errors there would misattribute citations silently rather than
+    failing loudly.
+    """
+
+    PAGES: ClassVar[list[tuple[int, int]]] = [(0, 1), (20, 2), (45, 3)]
+
+    def test_no_pages_yields_no_page_number(self) -> None:
+        assert _page_for_offset([], 0) is None
+
+    def test_offset_before_the_first_page_yields_no_page_number(self) -> None:
+        assert _page_for_offset([(10, 1)], 5) is None
+
+    @pytest.mark.parametrize(
+        ("offset", "expected"),
+        [(0, 1), (19, 1), (20, 2), (44, 2), (45, 3), (10_000, 3)],
+    )
+    def test_resolves_the_page_containing_the_offset(self, offset: int, expected: int) -> None:
+        """A page's own start offset belongs to that page, not the previous one."""
+        assert _page_for_offset(self.PAGES, offset) == expected
+
+    def test_agrees_with_a_linear_scan(self) -> None:
+        """Cross-check the binary search against the obvious implementation."""
+
+        def linear(pages: list[tuple[int, int]], offset: int) -> int | None:
+            current = None
+            for start, number in pages:
+                if start > offset:
+                    break
+                current = number
+            return current
+
+        pages = [(index * 7, index + 1) for index in range(50)]
+        for offset in range(0, 400):
+            assert _page_for_offset(pages, offset) == linear(pages, offset)
+
+
+class TestWhitespaceVariants:
+    def test_crlf_paragraph_break_is_preferred_over_a_line_break(self) -> None:
+        r"""``"\r\n\r\n"`` contains no ``"\n\n"``, so it needs its own entry.
+
+        Parsers normalise newlines, but this function is public and may be
+        handed raw Windows text; without the CRLF spelling a paragraph boundary
+        would silently lose to a mere line boundary.
+        """
+        text = "First paragraph here.\r\n\r\nSecond line\r\nThird line follows"
+
+        assert texts(text, 40, 0)[0] == "First paragraph here."
+
+    def test_carriage_return_only_paragraph_break_is_recognised(self) -> None:
+        text = "First paragraph here.\r\rSecond line\rThird line follows"
+
+        assert texts(text, 40, 0)[0] == "First paragraph here."
+
+    def test_breaks_on_a_non_breaking_space(self) -> None:
+        """Czech typography puts NBSP after single-letter prepositions.
+
+        Recognising only U+0020 would hard-cut such text mid-word.
+        """
+        nbsp = "\u00a0"
+        text = nbsp.join(["smlouva", "o", "dilo", "mezi", "stranami", "podepsana"])
+
+        first = texts(text, 20, 0)[0]
+
+        assert " " not in text, "fixture must rely on NBSP alone"
+        assert first == nbsp.join(["smlouva", "o", "dilo", "mezi"])
+
+    def test_breaks_on_a_tab(self) -> None:
+        text = "column_one\tcolumn_two\tcolumn_three\tcolumn_four"
+
+        assert texts(text, 25, 0)[0] == "column_one\tcolumn_two"
+
+    def test_still_hard_cuts_when_no_whitespace_exists_at_all(self) -> None:
+        assert [end - start for start, end in spans("x" * 50, 20, 0)] == [20, 20, 10]
 
 
 class TestOverlap:

@@ -27,6 +27,7 @@ Two invariants hold for every chunk produced here, and both are tested:
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from typing import TYPE_CHECKING
 
 from local_rag.models import Chunk, ChunkMetadata
@@ -44,9 +45,26 @@ __all__ = ["PAGE_SEPARATOR", "chunk_document", "iter_chunk_spans"]
 PAGE_SEPARATOR = "\n\n"
 
 #: Break candidates in descending order of preference. Earlier entries produce
-#: more semantically coherent edges; the trailing single space is the last
-#: resort before an unavoidable hard cut.
-_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ")
+#: more semantically coherent edges.
+#:
+#: Parsers normalise newlines to ``\n``, but this function is public and may be
+#: handed raw text, so the CRLF and CR spellings of a paragraph break are listed
+#: too. Without them a Windows text file would fall through to the line-break
+#: search, since ``"\r\n\r\n"`` does not contain ``"\n\n"``, and a paragraph
+#: boundary would silently lose to a mere line boundary.
+_SEPARATORS: tuple[str, ...] = (
+    "\n\n",
+    "\r\n\r\n",
+    "\r\r",
+    "\n",
+    "\r",
+    ". ",
+    "! ",
+    "? ",
+    "; ",
+    ", ",
+    " ",
+)
 
 #: A break is only accepted in the last portion of the window. Without a floor,
 #: an early paragraph break would produce a chunk a fraction of the requested
@@ -74,6 +92,15 @@ def _find_break(text: str, hard_end: int, floor: int) -> int:
         found = text.rfind(separator, floor, hard_end)
         if found != -1:
             return found + len(separator)
+
+    # The listed separators cover ASCII spacing only. Documents carry other
+    # whitespace — tabs, and the non-breaking spaces Czech typography places
+    # after single-letter prepositions — and a window held together by those
+    # alone would otherwise be cut mid-word.
+    for offset in range(hard_end - 1, floor - 1, -1):
+        if text[offset].isspace():
+            return offset + 1
+
     return hard_end
 
 
@@ -222,12 +249,17 @@ def _page_for_offset(page_starts: Sequence[tuple[int, int]], offset: int) -> int
     Returns:
         The page number, or ``None`` if there are no pages.
     """
-    current: int | None = None
-    for start, page_number in page_starts:
-        if start > offset:
-            break
-        current = page_number
-    return current
+    if not page_starts:
+        return None
+
+    # Binary search rather than a linear scan. Chunk count grows with page
+    # count, so scanning from page 1 for every chunk would make attribution
+    # quadratic in the length of the document — the cost falling hardest on the
+    # long scanned PDFs this corpus is full of.
+    index = bisect_right(page_starts, offset, key=lambda entry: entry[0]) - 1
+    if index < 0:
+        return None
+    return page_starts[index][1]
 
 
 def chunk_document(

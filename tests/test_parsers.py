@@ -43,6 +43,26 @@ class TestTextParser:
 
         assert TextParser().parse(path)[0].text == CZECH_SAMPLE
 
+    def test_crlf_line_endings_are_normalised(self, tmp_path: Path) -> None:
+        r"""Chunking looks for "\n\n" paragraph breaks, which CRLF does not contain.
+
+        Without normalisation a Windows text file would lose every paragraph
+        boundary to a mere line boundary during chunking.
+        """
+        path = tmp_path / "windows.txt"
+        path.write_bytes(b"First paragraph.\r\n\r\nSecond paragraph.\r\n")
+
+        text = TextParser().parse(path)[0].text
+
+        assert "\r" not in text
+        assert text == "First paragraph.\n\nSecond paragraph.\n"
+
+    def test_lone_carriage_returns_are_normalised(self, tmp_path: Path) -> None:
+        path = tmp_path / "classic.txt"
+        path.write_bytes(b"First line.\rSecond line.")
+
+        assert TextParser().parse(path)[0].text == "First line.\nSecond line."
+
     def test_empty_file_yields_no_pages(self, tmp_path: Path) -> None:
         path = tmp_path / "empty.txt"
         path.write_text("", encoding="utf-8")
@@ -140,6 +160,12 @@ class TestDocxParser:
         path = make_docx(tmp_path / "doc.docx", paragraphs=[CZECH_SAMPLE])
 
         assert CZECH_SAMPLE in DocxParser().parse(path)[0].text
+
+    def test_line_endings_are_normalised(self, tmp_path: Path) -> None:
+        """Word stores soft line breaks as CR; every parser must emit LF only."""
+        path = make_docx(tmp_path / "doc.docx", paragraphs=["First\rSecond"])
+
+        assert "\r" not in DocxParser().parse(path)[0].text
 
     def test_document_without_text_yields_no_pages(self, tmp_path: Path) -> None:
         path = make_docx(tmp_path / "empty.docx", paragraphs=[])

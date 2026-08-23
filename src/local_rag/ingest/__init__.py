@@ -19,7 +19,7 @@ from local_rag.ingest.base import (
     UnsupportedFormatError,
 )
 from local_rag.ingest.loader import load_corpus, load_document
-from local_rag.ingest.parsers import DocxParser, PdfParser, TextParser
+from local_rag.ingest.parsers import DocxParser, PdfParser, TextParser, normalise_newlines
 from local_rag.ingest.registry import ParserRegistry, default_registry
 from local_rag.ingest.scanner import (
     IGNORED_FILE_NAMES,
@@ -53,6 +53,7 @@ __all__ = [
     "iter_source_files",
     "load_corpus",
     "load_document",
+    "normalise_newlines",
     "scan_corpus",
     "validate_corpus_root",
 ]
