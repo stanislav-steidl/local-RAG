@@ -122,9 +122,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Test names are the documentation; docstrings are added only where a test
+# encodes a non-obvious rationale.
 "tests/**/*.py" = [
     "S101",    # assert is the point of a test
-    "D100",    # module docstrings not required for test modules
+    "D100",    # module docstring not required for test modules
+    "D101",    # test classes are grouping, not API
+    "D102",    # ditto their methods
     "D103",    # test function names are the documentation
     "PLR2004", # magic values are fine in assertions
 ]
@@ -140,6 +144,10 @@ known-first-party = ["local_rag"]
 # ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.10"
+# Resolve the package from source so type-checking works without an editable
+# install — notably inside pre-commit's isolated hook environment.
+mypy_path = "src"
+explicit_package_bases = true
 strict = true
 warn_unreachable = true
 warn_no_return = true
