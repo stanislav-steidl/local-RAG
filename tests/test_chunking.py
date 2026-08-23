@@ -302,6 +302,20 @@ class TestOverlap:
         """
         assert len(spans("x" * 50, 20, 5)) == 3
 
+    def test_a_high_overlap_still_produces_overlapping_chunks(self) -> None:
+        """Forcing progress by skipping the cursor forward once removed overlap entirely.
+
+        This split previously yielded ``(0, 13)`` then ``(14, 24)`` — adjacent
+        but disjoint, so no chunk held both "sentence" and "here" despite 15
+        characters of context being requested.
+        """
+        text = "Some sentence here. " * 2
+        produced = spans(text, 16, 15)
+
+        assert len(produced) > 1
+        for (_, first_end), (second_start, _) in pairwise(produced):
+            assert second_start < first_end
+
     def test_zero_overlap_produces_disjoint_chunks(self) -> None:
         text = "word " * 100
         produced = spans(text, 50, 0)

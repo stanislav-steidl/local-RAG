@@ -49,7 +49,12 @@ def _render_table(table: Any) -> str:
     Returns:
         The table's text, rows separated by newlines and cells by tabs.
     """
-    rows = ("\t".join(cell.text.strip() for cell in row.cells) for row in table.rows)
+    # A cell holding several paragraphs or a soft break carries newlines of its
+    # own. Left alone they would split one logical row across several lines,
+    # breaking the one-row-per-line contract and stranding a first-cell label
+    # away from the value it names. Collapsing each cell's whitespace keeps the
+    # row intact.
+    rows = ("\t".join(" ".join(cell.text.split()) for cell in row.cells) for row in table.rows)
     return "\n".join(row for row in rows if row.strip())
 
 

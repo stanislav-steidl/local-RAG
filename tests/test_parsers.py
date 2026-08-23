@@ -162,6 +162,18 @@ class TestDocxParser:
 
         assert DocxParser().parse(path)[0].text == "Polozka\tCastka\nSluzba\t12 345 Kc"
 
+    def test_a_multiline_cell_stays_on_its_row(self, tmp_path: Path) -> None:
+        """A cell's own line breaks would otherwise split one logical row."""
+        path = make_docx(
+            tmp_path / "invoice.docx",
+            table=[["Polozka\nrozepsana", "12 345 Kc"]],
+        )
+
+        text = DocxParser().parse(path)[0].text
+
+        assert text == "Polozka rozepsana\t12 345 Kc"
+        assert text.count("\n") == 0
+
     def test_extracts_table_cells(self, tmp_path: Path) -> None:
         """Invoices keep the retrievable facts — amounts, dates — inside tables."""
         path = make_docx(

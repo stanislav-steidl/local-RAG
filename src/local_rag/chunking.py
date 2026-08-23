@@ -181,7 +181,12 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
             end = length
         else:
             floor = start + max(1, int(chunk_size * _MIN_FILL_RATIO))
-            end = _find_break(text, hard_end, floor)
+            # The break must also land beyond what has already been emitted.
+            # Snapping back to the previous chunk's boundary would contribute
+            # nothing, and the only way out of that would be to skip the cursor
+            # forward — which discards the requested overlap entirely.
+            floor = max(floor, previous_end + 1)
+            end = hard_end if floor >= hard_end else _find_break(text, hard_end, floor)
 
         trimmed_end = _trim_trailing(text, start, end)
 
@@ -212,12 +217,15 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
             # fragment such as "amma delta" — embedded and cited as written.
             start = _align_to_word_start(text, cursor, max(start + 1, cursor - chunk_overlap))
         else:
-            # This window added nothing beyond what is already emitted, so the
-            # break search found the same separator again. Backing off by the
-            # overlap would only re-derive it, shuffling forward a character at
-            # a time and eventually starting a chunk mid-word. Jump clear of
-            # the window instead; the content it covered is already indexed.
-            start = max(end, start + 1)
+            # Everything this window added beyond the previous chunk was
+            # whitespace, which trimming removed. Advance to the next word
+            # start rather than skipping the window wholesale: jumping to its
+            # end would leave the following chunk sharing nothing with this
+            # one, silently discarding the requested overlap at that seam.
+            cursor = start + 1
+            while cursor < end and not text[cursor - 1].isspace():
+                cursor += 1
+            start = cursor
 
 
 def _align_to_word_start(text: str, cursor: int, lower_bound: int) -> int:
