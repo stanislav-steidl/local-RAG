@@ -131,6 +131,7 @@ ignore = [
     "D102",    # ditto their methods
     "D103",    # test function names are the documentation
     "PLR2004", # magic values are fine in assertions
+    "TC",      # deferring typing-only imports buys nothing in a test module
 ]
 
 [tool.ruff.lint.pydocstyle]
