@@ -143,6 +143,25 @@ class TestDocxParser:
         assert "First para" in pages[0].text
         assert "Second para" in pages[0].text
 
+    def test_paragraphs_are_separated_by_a_blank_line(self, tmp_path: Path) -> None:
+        """A single newline would be indistinguishable from a soft line break.
+
+        The chunker prefers paragraph breaks over line breaks; joining blocks
+        with one newline meant that preference could never apply to DOCX.
+        """
+        path = make_docx(tmp_path / "doc.docx", paragraphs=["First para", "Second para"])
+
+        assert DocxParser().parse(path)[0].text == "First para\n\nSecond para"
+
+    def test_table_rows_keep_their_cells_on_one_line(self, tmp_path: Path) -> None:
+        """A label and its value must stay adjacent to be retrievable together."""
+        path = make_docx(
+            tmp_path / "invoice.docx",
+            table=[["Polozka", "Castka"], ["Sluzba", "12 345 Kc"]],
+        )
+
+        assert DocxParser().parse(path)[0].text == "Polozka\tCastka\nSluzba\t12 345 Kc"
+
     def test_extracts_table_cells(self, tmp_path: Path) -> None:
         """Invoices keep the retrievable facts — amounts, dates — inside tables."""
         path = make_docx(

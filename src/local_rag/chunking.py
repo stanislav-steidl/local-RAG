@@ -135,9 +135,9 @@ def iter_chunk_spans(
 ) -> Iterator[tuple[int, int]]:
     """Yield ``(start, end)`` offsets of successive chunks of ``text``.
 
-    Spans are trimmed of surrounding whitespace, so the offsets address exactly
-    the text a chunk stores rather than the raw window. Windows that contain
-    only whitespace are dropped.
+    Leading whitespace is skipped before a window is sized, and trailing
+    whitespace is trimmed from it afterwards, so the offsets address exactly the
+    text a chunk stores rather than the raw window.
 
     Args:
         text: Text to split.
@@ -165,6 +165,16 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
     previous_end = -1
 
     while start < length:
+        # Advance past leading whitespace *before* sizing the window. Sizing
+        # from a start that points at a page separator spends part of the
+        # budget on characters the chunk will not keep, pushing the remainder
+        # into an extra sliver of a chunk: two 100-character pages at
+        # chunk_size=100 otherwise yielded 100, 98 and 2 characters.
+        while start < length and text[start].isspace():
+            start += 1
+        if start >= length:
+            return
+
         hard_end = min(start + chunk_size, length)
 
         if hard_end == length:
@@ -173,7 +183,7 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
             floor = start + max(1, int(chunk_size * _MIN_FILL_RATIO))
             end = _find_break(text, hard_end, floor)
 
-        trimmed_start, trimmed_end = _trim(text, start, end)
+        trimmed_end = _trim_trailing(text, start, end)
 
         # Snapping to a boundary can make a chunk considerably shorter than
         # chunk_size. When the overlap is large relative to what a window
@@ -182,8 +192,8 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
         # to extend past the previous one keeps duplicate and redundant text
         # out of the index without ever skipping content, since starts are
         # non-decreasing.
-        if trimmed_end > trimmed_start and trimmed_end > previous_end:
-            yield trimmed_start, trimmed_end
+        if trimmed_end > previous_end:
+            yield start, trimmed_end
             previous_end = trimmed_end
 
         if end >= length:
@@ -194,27 +204,28 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
         start = max(end - chunk_overlap, start + 1)
 
 
-def _trim(text: str, start: int, end: int) -> tuple[int, int]:
-    """Shrink ``[start, end)`` past surrounding whitespace.
+def _trim_trailing(text: str, start: int, end: int) -> int:
+    """Shrink ``end`` back past trailing whitespace.
 
-    Trimming by adjusting offsets — rather than stripping the extracted string —
-    is what keeps ``end - start == len(text[start:end])`` true for the stored
-    chunk text.
+    Only the trailing side needs handling: the caller advances past leading
+    whitespace before sizing the window, so ``start`` already addresses a
+    non-whitespace character.
+
+    Trimming by adjusting the offset — rather than stripping the extracted
+    string — is what keeps ``end - start == len(text[start:end])`` true for the
+    stored chunk text.
 
     Args:
         text: Text the offsets address.
-        start: Inclusive start offset.
+        start: Inclusive start offset, already past any whitespace.
         end: Exclusive end offset.
 
     Returns:
-        The trimmed offsets. When the span holds only whitespace, an empty span
-        is returned.
+        The adjusted end offset, always greater than ``start``.
     """
-    while start < end and text[start].isspace():
-        start += 1
     while end > start and text[end - 1].isspace():
         end -= 1
-    return start, end
+    return end
 
 
 def _page_starts(pages: Sequence[PageText]) -> list[tuple[int, int]]:

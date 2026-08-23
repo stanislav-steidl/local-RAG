@@ -118,6 +118,25 @@ class TestInvariants:
         text = "word " * 200
         assert all(end - start <= 40 for start, end in spans(text, 40, 10))
 
+    def test_leading_whitespace_does_not_consume_the_window(self) -> None:
+        """Sizing from a start that points at a page separator spawned a sliver.
+
+        Two full pages at exactly ``chunk_size`` produced 100, 98 and 2
+        characters, because the separator was counted against the second
+        window's budget and pushed two characters into a third chunk. A
+        2-character chunk is embedded and retrieved like any other, so it is
+        pure noise in the index.
+        """
+        text = "A" * 100 + PAGE_SEPARATOR + "B" * 100
+
+        assert [end - start for start, end in spans(text, 100, 0)] == [100, 100]
+
+    def test_no_sliver_chunks_across_many_page_breaks(self) -> None:
+        pages = [chr(ord("A") + index) * 100 for index in range(5)]
+        text = PAGE_SEPARATOR.join(pages)
+
+        assert [end - start for start, end in spans(text, 100, 0)] == [100] * 5
+
     def test_no_chunk_has_surrounding_whitespace(self) -> None:
         text = "First paragraph.\n\n\n   Second paragraph.\n\n\nThird paragraph."
         assert all(chunk == chunk.strip() for chunk in texts(text, 20, 5))
@@ -282,6 +301,12 @@ class TestDegenerateInput:
     def test_text_exactly_one_chunk_long(self) -> None:
         text = "x" * 20
         assert texts(text, 20, 5) == [text]
+
+    def test_trailing_whitespace_does_not_produce_a_final_empty_chunk(self) -> None:
+        """The cursor can land inside trailing whitespace and run off the end."""
+        text = "A" * 100 + "   \n\n  "
+
+        assert texts(text, 100, 0) == ["A" * 100]
 
 
 class TestChunkDocument:

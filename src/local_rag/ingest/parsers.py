@@ -9,7 +9,7 @@ a PDF is parsed, not as an ImportError when the package is first imported.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from local_rag.ingest.base import DocumentParseError, DocumentParser, MissingDependencyError
 from local_rag.models import PageText
@@ -17,7 +17,7 @@ from local_rag.models import PageText
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["DocxParser", "PdfParser", "TextParser"]
+__all__ = ["PARAGRAPH_SEPARATOR", "DocxParser", "PdfParser", "TextParser", "normalise_newlines"]
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,31 @@ logger = logging.getLogger(__name__)
 #: were written in. latin-1 is last because it decodes any byte sequence
 #: without raising, so it must never pre-empt a more accurate candidate.
 _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1250", "latin-1")
+
+
+#: Separates structural blocks — paragraphs and tables — in extracted text.
+#: Must be a blank line, since that is what marks a paragraph boundary to the
+#: chunker.
+PARAGRAPH_SEPARATOR = "\n\n"
+
+
+def _render_table(table: Any) -> str:
+    r"""Render a table as one text block, one line per row.
+
+    Cells of a row stay on the same line so that a label and its value remain
+    adjacent — an invoice row reads as ``Sluzba\t12 345 Kc`` rather than
+    scattering the amount away from what it refers to, which is the difference
+    between a chunk that answers "how much was the service" and one that does
+    not.
+
+    Args:
+        table: A python-docx table.
+
+    Returns:
+        The table's text, rows separated by newlines and cells by tabs.
+    """
+    rows = ("\t".join(cell.text.strip() for cell in row.cells) for row in table.rows)
+    return "\n".join(row for row in rows if row.strip())
 
 
 def normalise_newlines(text: str) -> str:
@@ -169,13 +194,17 @@ class DocxParser(DocumentParser):
         try:
             document = docx.Document(str(path))
             blocks = [paragraph.text for paragraph in document.paragraphs]
-            blocks.extend(
-                cell.text for table in document.tables for row in table.rows for cell in row.cells
-            )
+            blocks.extend(_render_table(table) for table in document.tables)
         except Exception as error:  # python-docx raises package-specific errors
             raise DocumentParseError(f"cannot parse DOCX {path}: {error}") from error
 
-        text = "\n".join(normalise_newlines(block) for block in blocks if block.strip())
+        # Separate structural blocks by a blank line. Joining them with a single
+        # newline would make a real paragraph boundary indistinguishable from a
+        # soft line break inside one, and the chunker's preference for
+        # paragraph breaks over line breaks could never apply to DOCX at all.
+        text = PARAGRAPH_SEPARATOR.join(
+            normalise_newlines(block).strip() for block in blocks if block.strip()
+        )
         if not text:
             return ()
         return (PageText(page_number=1, text=text),)
