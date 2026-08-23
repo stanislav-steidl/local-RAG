@@ -82,7 +82,7 @@ class DocumentParser(ABC):
             One :class:`~local_rag.models.PageText` per page, in reading order.
             Unpaginated formats return a single entry numbered 1. Text must use
             ``\n`` line endings; every implementation normalises CRLF and lone
-            CR so that later stages need recognise only one spelling of a line
+            CR so that later stages need only recognise one spelling of a line
             break.
 
         Raises:
