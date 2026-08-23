@@ -1,0 +1,190 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-rag"
+version = "0.1.0"
+description = "A fully offline, local-first RAG system for searching a personal document corpus."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Stanislav Steidl" }]
+keywords = ["rag", "retrieval", "embeddings", "lancedb", "offline", "local-first"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+# Document parsing. Kept separate so the core package stays importable
+# (and unit-testable) without native PDF/DOCX dependencies.
+parsing = [
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+]
+# Dense + sparse embeddings via BGE-M3. Pulls in torch, so it is opt-in.
+embeddings = [
+    "sentence-transformers>=3.0",
+    "FlagEmbedding>=1.2",
+]
+# Vector storage and hybrid retrieval.
+store = [
+    "lancedb>=0.13",
+    "pyarrow>=16.0",
+    "numpy>=1.26",
+]
+# OCR for scanned PDFs and photographed documents.
+ocr = [
+    "pytesseract>=0.3.10",
+    "pillow>=10.3",
+    "pdf2image>=1.17",
+]
+# Local answer generation through Ollama.
+llm = [
+    "ollama>=0.3",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "black>=24.4",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+[project.scripts]
+local-rag = "local_rag.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/stanislav-steidl/local-RAG"
+Repository = "https://github.com/stanislav-steidl/local-RAG"
+Issues = "https://github.com/stanislav-steidl/local-RAG/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/local_rag"]
+
+# ---------------------------------------------------------------------------
+# Formatting — Black owns code style; Ruff's formatter stays out of the way.
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+# ---------------------------------------------------------------------------
+# Linting
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific rules
+    "N",    # pep8-naming
+    "D",    # pydocstyle
+    "ANN",  # flake8-annotations
+    "S",    # flake8-bandit (security)
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "TCH",  # flake8-type-checking
+    "PL",   # pylint
+]
+ignore = [
+    "D107",   # Missing docstring in __init__ (documented at class level)
+    "D203",   # 1 blank line before class docstring (conflicts with D211)
+    "D213",   # Multi-line summary on second line (conflicts with D212)
+    "ANN401", # Dynamically typed *args/**kwargs are occasionally warranted
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",    # assert is the point of a test
+    "D100",    # module docstrings not required for test modules
+    "D103",    # test function names are the documentation
+    "PLR2004", # magic values are fine in assertions
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["local_rag"]
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+show_error_codes = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = [
+    "pdfplumber.*",
+    "docx.*",
+    "lancedb.*",
+    "sentence_transformers.*",
+    "FlagEmbedding.*",
+    "pytesseract.*",
+    "pdf2image.*",
+    "ollama.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "slow: tests that download models or process large corpora (deselect with '-m \"not slow\"')",
+    "requires_parsing: needs the [parsing] extra installed",
+    "requires_embeddings: needs the [embeddings] extra installed",
+    "requires_store: needs the [store] extra installed",
+]
+
+[tool.coverage.run]
+source = ["src/local_rag"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

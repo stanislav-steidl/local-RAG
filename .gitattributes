@@ -1,0 +1,19 @@
+# Normalise line endings so the repository is byte-identical across platforms
+# and Black/Ruff behave the same on Linux and Windows CI runners.
+* text=auto eol=lf
+
+# Windows-only helpers keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be line-ending normalised.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.docx binary
+*.zip binary
+*.gguf binary
+*.safetensors binary
+*.lance binary

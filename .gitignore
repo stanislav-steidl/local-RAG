@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# Private data — NEVER commit anything derived from a real document corpus.
+# The corpus itself lives outside this repository (see LOCAL_RAG_CORPUS_DIR).
+# ---------------------------------------------------------------------------
+/data/
+/corpus/
+/documents/
+*.lance/
+/.lancedb/
+/index/
+/cache/
+.env
+.env.*
+!.env.example
+
+# Extracted text / OCR output caches (may contain private document content)
+*.extracted.json
+*.extracted.txt
+/.extraction_cache/
+
+# Model weights and HuggingFace caches
+/models/
+.cache/
+*.gguf
+*.safetensors
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Type checking / linting caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+/logs/
