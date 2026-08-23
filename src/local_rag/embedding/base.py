@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
 __all__ = ["DEFAULT_BATCH_SIZE", "Embedder", "Embedding", "SparseVector"]
 
@@ -63,6 +63,33 @@ class SparseVector:
         # it touches, rather than degrading one result.
         if any(not math.isfinite(value) for value in self.values):
             raise ValueError("values must not contain NaN or infinity")
+        # Storing a zero weight would contradict the type's own invariant and
+        # make len() report a term that carries no information. Backends whose
+        # output may contain zeros should build through from_mapping().
+        if any(value == 0.0 for value in self.values):
+            raise ValueError("values must be non-zero; use from_mapping() to drop empty weights")
+
+    @classmethod
+    def from_mapping(cls, weights: Mapping[int, float]) -> SparseVector:
+        """Build from a term-to-weight mapping, discarding zero weights.
+
+        Models express lexical weights as a mapping and may include zeros for
+        tokens that ended up contributing nothing. Dropping them here keeps the
+        strict constructor strict while giving backends a total function to
+        call.
+
+        Args:
+            weights: Vocabulary index to weight.
+
+        Returns:
+            A vector holding only the non-zero terms, ordered by index so that
+            two equal vectors compare equal.
+        """
+        kept = sorted((index, value) for index, value in weights.items() if value != 0.0)
+        return cls(
+            indices=tuple(index for index, _ in kept),
+            values=tuple(value for _, value in kept),
+        )
 
     def __len__(self) -> int:
         """Number of non-zero terms."""
@@ -93,6 +120,11 @@ class Embedding:
             raise ValueError("dense vector must not be empty")
         if any(not math.isfinite(value) for value in self.dense):
             raise ValueError("dense vector must not contain NaN or infinity")
+        # Cosine similarity divides by the vector's magnitude, so an all-zero
+        # vector has no defined similarity to anything. Storing one would put a
+        # row in the index that cannot be ranked, not one that ranks poorly.
+        if not any(self.dense):
+            raise ValueError("dense vector must have non-zero magnitude")
 
     @property
     def dimension(self) -> int:

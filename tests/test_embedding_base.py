@@ -93,6 +93,34 @@ class TestSparseVector:
         with pytest.raises(ValueError, match="NaN or infinity"):
             SparseVector(indices=(1, 2), values=(0.5, bad))
 
+    def test_zero_weights_are_rejected(self) -> None:
+        """Storing one would make len() count a term carrying no information."""
+        with pytest.raises(ValueError, match="must be non-zero"):
+            SparseVector(indices=(1,), values=(0.0,))
+
+
+class TestSparseVectorFromMapping:
+    def test_drops_zero_weights(self) -> None:
+        """Models emit zeros for tokens that contributed nothing."""
+        vector = SparseVector.from_mapping({1: 0.5, 2: 0.0, 3: 0.25})
+
+        assert vector.as_mapping() == {1: 0.5, 3: 0.25}
+
+    def test_orders_terms_by_index(self) -> None:
+        """Ordering makes two equal vectors compare equal."""
+        assert SparseVector.from_mapping({9: 0.1, 2: 0.2}).indices == (2, 9)
+
+    def test_an_all_zero_mapping_yields_an_empty_vector(self) -> None:
+        assert len(SparseVector.from_mapping({1: 0.0, 2: 0.0})) == 0
+
+    def test_an_empty_mapping_yields_an_empty_vector(self) -> None:
+        assert SparseVector.from_mapping({}) == SparseVector()
+
+    def test_equal_mappings_produce_equal_vectors(self) -> None:
+        assert SparseVector.from_mapping({2: 0.5, 7: 0.1}) == SparseVector.from_mapping(
+            {7: 0.1, 2: 0.5}
+        )
+
 
 class TestEmbedding:
     def test_reports_its_dimension(self) -> None:
@@ -115,6 +143,22 @@ class TestEmbedding:
         """NaN propagates through cosine similarity and poisons every ranking."""
         with pytest.raises(ValueError, match="NaN or infinity"):
             Embedding(dense=(1.0, bad))
+
+    @pytest.mark.parametrize("zeros", [(0.0,), (0.0, 0.0, 0.0), (0.0, -0.0)])
+    def test_zero_magnitude_vectors_are_rejected(self, zeros: tuple[float, ...]) -> None:
+        """Cosine similarity divides by magnitude, so a zero vector cannot be ranked.
+
+        Such a row would be unrankable rather than merely a poor match.
+        """
+        with pytest.raises(ValueError, match="non-zero magnitude"):
+            Embedding(dense=zeros)
+
+    def test_a_vector_with_one_non_zero_component_is_accepted(self) -> None:
+        assert Embedding(dense=(0.0, 0.0, 0.5)).dimension == 3
+
+    def test_a_negative_only_vector_is_accepted(self) -> None:
+        """Direction matters, not sign; a negative vector has real magnitude."""
+        assert Embedding(dense=(-1.0, -2.0)).dimension == 2
 
 
 class TestBatching:
