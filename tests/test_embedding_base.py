@@ -232,6 +232,27 @@ class TestBatching:
         assert embedder.embed_documents([]) == []
         assert embedder.calls == []
 
+    def test_a_bare_string_is_rejected(self) -> None:
+        """``str`` satisfies ``Sequence[str]``, so the type system permits this.
+
+        Left unchecked the call succeeds and embeds one vector per *character*,
+        which passes every backend guard and yields silent nonsense.
+
+        Note that mypy raises no complaint about the call below — it is a
+        well-typed use of ``Sequence[str]``. That is exactly why the guard has
+        to exist at runtime rather than in the signature.
+        """
+        embedder = RecordingEmbedder()
+
+        with pytest.raises(TypeError, match="not a single string"):
+            embedder.embed_documents("hello")
+
+        assert embedder.calls == []
+
+    def test_a_tuple_of_texts_is_accepted(self) -> None:
+        """Rejecting str must not narrow the interface to lists alone."""
+        assert len(RecordingEmbedder().embed_documents(("a", "b"))) == 2
+
     def test_batch_size_is_exposed(self) -> None:
         assert RecordingEmbedder(batch_size=4).batch_size == 4
 
@@ -314,7 +335,12 @@ class TestQueryEmbedding:
 
         assert embedder.embed_query("hello").dense[0] == 5.0
 
-    def test_query_goes_through_the_backend_once(self) -> None:
+    def test_the_query_reaches_the_backend_whole(self) -> None:
+        """It takes a bare string, so it must wrap rather than forward it.
+
+        Forwarding would hit the character-splitting trap that
+        ``embed_documents`` now rejects outright.
+        """
         embedder = RecordingEmbedder()
 
         embedder.embed_query("hello")

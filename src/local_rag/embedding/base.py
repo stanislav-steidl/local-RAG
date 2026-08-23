@@ -190,18 +190,32 @@ class Embedder(ABC):
         """Embed texts for storage in the index.
 
         Args:
-            texts: Texts to embed. May be empty.
+            texts: Texts to embed. May be empty. Must be a collection of
+                strings rather than a single string.
 
         Returns:
             One embedding per input text, in input order.
 
         Raises:
-            RuntimeError: If the backend returns the wrong number of
-                embeddings, or vectors of inconsistent width. Either would
-                otherwise silently misalign embeddings with their chunks, which
-                surfaces much later as retrieval that returns the wrong
-                document.
+            TypeError: If ``texts`` is itself a string. A ``str`` satisfies
+                ``Sequence[str]``, so the call would otherwise succeed and
+                embed the text one character at a time.
+            RuntimeError: If the backend breaks its contract, in any of three
+                ways with distinct consequences. Returning a different number
+                of embeddings than it was given misaligns every chunk after the
+                gap, surfacing much later as retrieval that confidently returns
+                the wrong document. Returning widths that are inconsistent, or
+                that disagree with :attr:`dimension`, produces vectors the store
+                cannot hold. Returning sparse presence that contradicts
+                :attr:`supports_sparse` either leaves hybrid search without a
+                lexical side or has that data silently discarded.
         """
+        if isinstance(texts, str):
+            raise TypeError(
+                "embed_documents expects a collection of texts, not a single string; "
+                "pass [text] to embed one document"
+            )
+
         embeddings: list[Embedding] = []
         for batch in self._batches(texts):
             produced = self._embed_batch(batch)
