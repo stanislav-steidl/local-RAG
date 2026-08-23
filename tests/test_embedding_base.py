@@ -52,6 +52,14 @@ class InconsistentWidthEmbedder(RecordingEmbedder):
         ]
 
 
+class MisdeclaredWidthEmbedder(RecordingEmbedder):
+    """Returns a consistent width that disagrees with its declared dimension."""
+
+    @property
+    def dimension(self) -> int:
+        return self._width + 1
+
+
 class TestSparseVector:
     def test_defaults_to_empty(self) -> None:
         vector = SparseVector()
@@ -78,6 +86,12 @@ class TestSparseVector:
         """A repeated term has an ambiguous weight."""
         with pytest.raises(ValueError, match="unique"):
             SparseVector(indices=(3, 3), values=(0.5, 0.25))
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_weights_are_rejected(self, bad: float) -> None:
+        """A non-finite weight poisons hybrid ranking just as it does cosine scoring."""
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            SparseVector(indices=(1, 2), values=(0.5, bad))
 
 
 class TestEmbedding:
@@ -159,6 +173,22 @@ class TestBackendGuards:
 
         with pytest.raises(RuntimeError, match="mixed dense widths"):
             embedder.embed_documents(["a", "b", "c"])
+
+    def test_a_consistent_width_that_contradicts_the_declared_dimension_is_caught(self) -> None:
+        """Uniform is not sufficient; it must match what the embedder advertises.
+
+        The store is configured from ``dimension`` before anything is written,
+        so a backend that consistently disagrees would otherwise be caught only
+        at insert time, far from the cause.
+        """
+        embedder = MisdeclaredWidthEmbedder(width=3)
+
+        with pytest.raises(RuntimeError, match="declares dimension 4"):
+            embedder.embed_documents(["a", "b"])
+
+    def test_an_empty_request_skips_the_width_checks(self) -> None:
+        """No embeddings means nothing to disagree about."""
+        assert MisdeclaredWidthEmbedder(width=3).embed_documents([]) == []
 
 
 class TestQueryEmbedding:

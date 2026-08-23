@@ -58,6 +58,11 @@ class SparseVector:
             raise ValueError("indices must be non-negative")
         if len(set(self.indices)) != len(self.indices):
             raise ValueError("indices must be unique")
+        # Checked for the same reason as the dense vector: a non-finite weight
+        # propagates through lexical scoring and poisons every hybrid ranking
+        # it touches, rather than degrading one result.
+        if any(not math.isfinite(value) for value in self.values):
+            raise ValueError("values must not contain NaN or infinity")
 
     def __len__(self) -> int:
         """Number of non-zero terms."""
@@ -177,6 +182,15 @@ class Embedder(ABC):
         widths = {embedding.dimension for embedding in embeddings}
         if len(widths) > 1:
             raise RuntimeError(f"backend returned mixed dense widths: {sorted(widths)}")
+        # Uniform width is not enough: it must also be the width this embedder
+        # advertises, since the vector store is configured from `dimension`
+        # before a single embedding is written. A backend that consistently
+        # disagrees would otherwise be caught only at insert time.
+        if widths and widths != {self.dimension}:
+            raise RuntimeError(
+                f"backend returned {next(iter(widths))}-dimensional vectors but this "
+                f"embedder declares dimension {self.dimension}"
+            )
 
         return embeddings
 
