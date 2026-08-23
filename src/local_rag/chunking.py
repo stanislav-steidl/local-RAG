@@ -192,16 +192,61 @@ def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tupl
         # to extend past the previous one keeps duplicate and redundant text
         # out of the index without ever skipping content, since starts are
         # non-decreasing.
-        if trimmed_end > previous_end:
+        emitted = trimmed_end > previous_end
+        if emitted:
             yield start, trimmed_end
             previous_end = trimmed_end
 
         if end >= length:
             return
 
-        # Guarantee forward progress. Backing off by the overlap must never
-        # land at or before the current start, or the loop would not terminate.
-        start = max(end - chunk_overlap, start + 1)
+        if emitted:
+            # Guarantee forward progress. Backing off by the overlap must never
+            # land at or before the current start, or the loop would not
+            # terminate.
+            cursor = max(end - chunk_overlap, start + 1)
+
+            # Backing off by a fixed character count lands wherever it lands,
+            # which is usually mid-word. Only chunk *endings* would then be
+            # boundary-aware, and every overlapping chunk would open on a
+            # fragment such as "amma delta" — embedded and cited as written.
+            start = _align_to_word_start(text, cursor, max(start + 1, cursor - chunk_overlap))
+        else:
+            # This window added nothing beyond what is already emitted, so the
+            # break search found the same separator again. Backing off by the
+            # overlap would only re-derive it, shuffling forward a character at
+            # a time and eventually starting a chunk mid-word. Jump clear of
+            # the window instead; the content it covered is already indexed.
+            start = max(end, start + 1)
+
+
+def _align_to_word_start(text: str, cursor: int, lower_bound: int) -> int:
+    """Move ``cursor`` back to the start of the word it landed inside.
+
+    Moving *backwards* rather than forwards is deliberate: it widens the
+    overlap slightly to take in the whole word, where moving forwards would
+    discard the very context the overlap exists to provide.
+
+    The search is bounded so that text without whitespace — an unbroken run, or
+    a long identifier — does not drag the cursor far back and produce a cascade
+    of near-identical chunks. When no boundary lies within reach the original
+    cursor is kept: a mid-word start is unavoidable there anyway.
+
+    Args:
+        text: Text being split.
+        cursor: Offset the overlap arithmetic produced.
+        lower_bound: Earliest offset the search may reach.
+
+    Returns:
+        The aligned offset, never below ``lower_bound`` and never above
+        ``cursor``, so forward progress and full coverage both still hold.
+    """
+    aligned = cursor
+    while aligned > lower_bound and not text[aligned - 1].isspace():
+        aligned -= 1
+
+    starts_a_word = aligned > 0 and text[aligned - 1].isspace()
+    return aligned if starts_a_word else cursor
 
 
 def _trim_trailing(text: str, start: int, end: int) -> int:

@@ -275,6 +275,33 @@ class TestOverlap:
         for (_, first_end), (second_start, _) in pairwise(produced):
             assert second_start < first_end
 
+    def test_overlapping_chunks_start_on_a_whole_word(self) -> None:
+        """Backing off by a character count alone opened chunks mid-word.
+
+        The overlap cursor lands wherever the arithmetic puts it, so only chunk
+        endings were boundary-aware: this split once produced
+        ``"amma delta epsilon"``, a fragment that would be embedded and cited
+        exactly as written.
+        """
+        text = "alpha beta gamma delta epsilon"
+
+        assert texts(text, 20, 5) == ["alpha beta gamma", "gamma delta epsilon"]
+
+    @pytest.mark.parametrize("overlap", [5, 15, 30])
+    def test_every_chunk_starts_at_a_word_boundary(self, overlap: int) -> None:
+        text = "Some sentence here with several words. " * 12
+
+        for start, _ in spans(text, 60, overlap):
+            assert start == 0 or text[start - 1].isspace()
+
+    def test_alignment_does_not_cascade_on_unbroken_text(self) -> None:
+        """Searching back without a bound would shift the cursor by one forever.
+
+        Text with no whitespace offers no word start, so the original cursor
+        must be kept rather than dragged backwards.
+        """
+        assert len(spans("x" * 50, 20, 5)) == 3
+
     def test_zero_overlap_produces_disjoint_chunks(self) -> None:
         text = "word " * 100
         produced = spans(text, 50, 0)
