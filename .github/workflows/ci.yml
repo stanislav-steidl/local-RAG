@@ -68,8 +68,16 @@ jobs:
     needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
+      # A job result is one of success, failure, cancelled or skipped. Only the
+      # first is acceptable: a skipped job has not proven anything, so treating
+      # it as success would let the gate pass vacuously if an upstream job ever
+      # gained an `if:` condition or its matrix produced no combinations.
       - name: Verify every upstream job succeeded
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        if: >-
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
         run: |
+          echo "Upstream job results: ${{ join(needs.*.result, ', ') }}"
           echo "A required job did not succeed."
           exit 1
