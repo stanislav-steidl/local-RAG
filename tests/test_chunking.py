@@ -54,6 +54,11 @@ class TestParameterValidation:
         with pytest.raises(ValueError, match="must be smaller than"):
             spans("text", 10, 20)
 
+    def test_validation_happens_on_call_not_on_first_iteration(self) -> None:
+        """A generator would defer validation until consumed, hiding bad settings."""
+        with pytest.raises(ValueError, match="must be smaller than"):
+            iter_chunk_spans("text", chunk_size=10, chunk_overlap=10)
+
 
 class TestInvariants:
     @pytest.mark.parametrize("size", [16, 40, 128])
@@ -131,8 +136,8 @@ class TestBoundaryAwareness:
         assert not texts(text, 20, 0)[0].endswith(("alph", "bet", "gamm"))
         assert texts(text, 20, 0)[0] == "alpha beta gamma"
 
-    def test_hard_cuts_only_when_no_boundary_exists(self) -> None:
-        """An unbroken run has no natural edge, so a hard cut is unavoidable."""
+    def test_hard_cuts_an_unbroken_run(self) -> None:
+        """Text with no separator anywhere has no natural edge to snap to."""
         text = "x" * 50
         assert [end - start for start, end in spans(text, 20, 0)] == [20, 20, 10]
 
@@ -140,6 +145,20 @@ class TestBoundaryAwareness:
         """Honouring it would emit a tiny chunk and inflate the chunk count."""
         text = "Hi.\n\n" + "continuous text without any breaks at all here"
         assert len(texts(text, 40, 0)[0]) > 20
+
+    def test_hard_cuts_when_the_only_break_falls_before_the_accepted_region(self) -> None:
+        """A break exists, yet the chunk is still cut hard — by design.
+
+        Only the latter part of the window is eligible, so a boundary near the
+        start is passed over. Worth pinning down because it contradicts the
+        intuitive reading of "hard cuts happen only without a boundary".
+        """
+        text = "Hi.\n\n" + "x" * 60
+
+        first = texts(text, 20, 0)[0]
+
+        assert first == "Hi.\n\n" + "x" * 15
+        assert first.endswith("x")
 
 
 class TestOverlap:
@@ -214,6 +233,24 @@ class TestChunkDocument:
 
     def test_invalid_parameters_propagate(self) -> None:
         document = make_document(["some text"])
+
+        with pytest.raises(ValueError, match="must be smaller than"):
+            chunk_document(document, chunk_size=10, chunk_overlap=10)
+
+    @pytest.mark.parametrize(
+        ("pages", "description"),
+        [([], "no pages"), (["", "   "], "scanned pages")],
+    )
+    def test_invalid_parameters_are_rejected_even_without_text(
+        self, pages: list[str], description: str
+    ) -> None:
+        """Validation must not depend on the document happening to have content.
+
+        The empty-document shortcut once returned before any check ran, so the
+        same misconfiguration raised for a text document but passed silently
+        for a scan — making the failure depend on corpus ordering.
+        """
+        document = make_document(pages)
 
         with pytest.raises(ValueError, match="must be smaller than"):
             chunk_document(document, chunk_size=10, chunk_overlap=10)

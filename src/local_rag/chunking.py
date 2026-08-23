@@ -9,8 +9,11 @@ their own embedding until nothing matches them strongly.
 The splitter is therefore *boundary-aware*. It fills up to ``chunk_size``
 characters, then walks backwards to the most natural break available —
 paragraph, line, sentence, clause, word — accepting a shorter chunk in exchange
-for a clean edge. A hard cut happens only when no boundary exists at all, as in
-an unbroken run of characters.
+for a clean edge. Only breaks in the latter part of the window are eligible: a
+break close to the start would emit a chunk a fraction of the requested size
+and inflate the chunk count. A hard cut therefore happens whenever that region
+holds no break — because the text is an unbroken run, or because its only break
+falls too early to accept.
 
 Two invariants hold for every chunk produced here, and both are tested:
 
@@ -62,14 +65,39 @@ def _find_break(text: str, hard_end: int, floor: int) -> int:
 
     Returns:
         The offset to end the chunk at: just past the highest-priority
-        separator found in ``[floor, hard_end)``, or ``hard_end`` if the window
-        contains no separator at all.
+        separator found in ``[floor, hard_end)``, or ``hard_end`` for a hard cut
+        when that range holds no separator. Note that separators before
+        ``floor`` are deliberately not considered, so text can be hard cut even
+        though the wider window does contain a break.
     """
     for separator in _SEPARATORS:
         found = text.rfind(separator, floor, hard_end)
         if found != -1:
             return found + len(separator)
     return hard_end
+
+
+def _validate_chunk_parameters(chunk_size: int, chunk_overlap: int) -> None:
+    """Check the chunking parameters, independently of any document.
+
+    Kept separate so that validation cannot be bypassed by an early return —
+    invalid settings must fail identically whether the document has text or not.
+
+    Args:
+        chunk_size: Maximum characters per chunk.
+        chunk_overlap: Characters shared between adjacent chunks.
+
+    Raises:
+        ValueError: If the parameters are not usable.
+    """
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    if chunk_overlap < 0:
+        raise ValueError(f"chunk_overlap must be non-negative, got {chunk_overlap}")
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})"
+        )
 
 
 def iter_chunk_spans(
@@ -94,17 +122,17 @@ def iter_chunk_spans(
 
     Raises:
         ValueError: If ``chunk_size`` is not positive, ``chunk_overlap`` is
-            negative, or the overlap is not smaller than the chunk size.
+            negative, or the overlap is not smaller than the chunk size. Raised
+            when the function is called, not when the iterator is first
+            advanced, so a caller that never consumes the result still learns
+            its settings were wrong.
     """
-    if chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-    if chunk_overlap < 0:
-        raise ValueError(f"chunk_overlap must be non-negative, got {chunk_overlap}")
-    if chunk_overlap >= chunk_size:
-        raise ValueError(
-            f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})"
-        )
+    _validate_chunk_parameters(chunk_size, chunk_overlap)
+    return _iter_spans(text, chunk_size, chunk_overlap)
 
+
+def _iter_spans(text: str, chunk_size: int, chunk_overlap: int) -> Iterator[tuple[int, int]]:
+    """Walk ``text`` producing chunk spans, assuming parameters are valid."""
     length = len(text)
     start = 0
     previous_end = -1
@@ -224,8 +252,15 @@ def chunk_document(
         awaiting OCR, for instance — yields an empty list rather than an error.
 
     Raises:
-        ValueError: If the chunking parameters are invalid.
+        ValueError: If the chunking parameters are invalid. Checked before the
+            document is inspected, so the outcome never depends on whether this
+            particular file happened to contain text.
     """
+    # Validate before the empty-document shortcut. Otherwise the same invalid
+    # settings would raise for one document and pass silently for a scan
+    # awaiting OCR, making the error depend on which file happened to come first.
+    _validate_chunk_parameters(chunk_size, chunk_overlap)
+
     text = document.text
     if not text.strip():
         return []
