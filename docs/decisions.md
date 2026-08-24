@@ -93,7 +93,8 @@ rewriting into LCEL.
 
 ## 5. Extras-based dependency layout
 
-**Constraint.** `sentence-transformers` pulls in PyTorch (~2 GB). Requiring it to run the test
+**Constraint.** `FlagEmbedding` pulls in PyTorch and Transformers (~1.3 GB installed, plus
+2.3 GB of model weights on first load). Requiring it to run the test
 suite would make CI slow and contributor setup heavy.
 
 **Rationale.** Optional extras (`parsing`, `embeddings`, `store`, `ocr`, `llm`) keep the core

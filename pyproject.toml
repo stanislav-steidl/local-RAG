@@ -35,10 +35,14 @@ parsing = [
     "pdfplumber>=0.11",
     "python-docx>=1.1",
 ]
-# Dense + sparse embeddings via BGE-M3. Pulls in torch, so it is opt-in.
+# Dense + sparse embeddings via BGE-M3. FlagEmbedding is BAAI's own
+# implementation and the only one that exposes the sparse head; it pulls in
+# torch and transformers, so the whole extra is opt-in.
 embeddings = [
-    "sentence-transformers>=3.0",
-    "FlagEmbedding>=1.2",
+    # 1.3 renamed BGEM3FlagModel's `device` argument to `devices`. Resolving a
+    # 1.2.x release would install cleanly and then fail with a TypeError on the
+    # first model load, so the floor is a compatibility boundary, not a guess.
+    "FlagEmbedding>=1.3",
 ]
 # Vector storage and hybrid retrieval.
 store = [
@@ -163,8 +167,8 @@ module = [
     "pdfplumber.*",
     "docx.*",
     "lancedb.*",
-    "sentence_transformers.*",
     "FlagEmbedding.*",
+    "torch.*",
     "pytesseract.*",
     "pdf2image.*",
     "ollama.*",
