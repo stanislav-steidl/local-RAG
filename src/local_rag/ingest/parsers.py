@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from local_rag.errors import optional_dependency
 from local_rag.ingest.base import DocumentParseError, DocumentParser, MissingDependencyError
 from local_rag.models import PageText
 
@@ -142,12 +143,12 @@ class PdfParser(DocumentParser):
             DocumentParseError: If the file is not a readable PDF.
             MissingDependencyError: If pdfplumber is not installed.
         """
-        try:
+        with optional_dependency(
+            "pdfplumber",
+            "reading PDFs requires pdfplumber: pip install 'local-rag[parsing]'",
+            error_type=MissingDependencyError,
+        ):
             import pdfplumber  # noqa: PLC0415  # optional dependency, imported on use
-        except ImportError as error:
-            raise MissingDependencyError(
-                "reading PDFs requires pdfplumber: pip install 'local-rag[parsing]'"
-            ) from error
 
         try:
             with pdfplumber.open(path) as pdf:
@@ -189,12 +190,12 @@ class DocxParser(DocumentParser):
             DocumentParseError: If the file is not a readable DOCX.
             MissingDependencyError: If python-docx is not installed.
         """
-        try:
+        with optional_dependency(
+            "docx",
+            "reading DOCX files requires python-docx: pip install 'local-rag[parsing]'",
+            error_type=MissingDependencyError,
+        ):
             import docx  # noqa: PLC0415  # optional dependency, imported on use
-        except ImportError as error:
-            raise MissingDependencyError(
-                "reading DOCX files requires python-docx: pip install 'local-rag[parsing]'"
-            ) from error
 
         try:
             document = docx.Document(str(path))

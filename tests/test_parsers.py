@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import builtins
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_rag.ingest.base import DocumentParseError, MissingDependencyError
+from local_rag.ingest.base import (
+    DocumentParseError,
+    IngestionError,
+    MissingDependencyError,
+)
 from local_rag.ingest.parsers import DocxParser, PdfParser, TextParser
 
 from .synthetic import CZECH_SAMPLE, make_docx, make_pdf, make_scanned_pdf
@@ -222,6 +228,35 @@ class TestDocxParser:
         path = make_docx(tmp_path / "doc.docx", paragraphs=["text"])
 
         with pytest.raises(MissingDependencyError, match=r"local-rag\[parsing\]"):
+            DocxParser().parse(path)
+
+    def test_a_broken_dependency_is_not_reported_as_a_missing_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """python-docx failing its own imports must not read as "not installed"."""
+        real_import = builtins.__import__
+
+        def break_inside_docx(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "docx":
+                raise ModuleNotFoundError("No module named 'lxml'", name="lxml")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", break_inside_docx)
+        path = make_docx(tmp_path / "doc.docx", paragraphs=["text"])
+
+        with pytest.raises(ModuleNotFoundError, match="lxml") as excinfo:
+            DocxParser().parse(path)
+
+        assert not isinstance(excinfo.value, MissingDependencyError)
+
+    def test_a_missing_dependency_remains_an_ingestion_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """load_corpus catches IngestionError; the shared helper must not break that."""
+        monkeypatch.setitem(sys.modules, "docx", None)
+        path = make_docx(tmp_path / "doc.docx", paragraphs=["text"])
+
+        with pytest.raises(IngestionError):
             DocxParser().parse(path)
 
 
