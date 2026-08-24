@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from local_rag.embedding.base import DEFAULT_BATCH_SIZE, Embedder, Embedding, SparseVector
-from local_rag.errors import MissingDependencyError
+from local_rag.errors import optional_dependency
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -130,19 +130,11 @@ class BgeM3Embedder(Embedder):
         Raises:
             MissingDependencyError: If FlagEmbedding is not installed.
         """
-        try:
+        with optional_dependency(
+            "FlagEmbedding",
+            "BGE-M3 requires FlagEmbedding: pip install 'local-rag[embeddings]'",
+        ):
             from FlagEmbedding import BGEM3FlagModel  # noqa: PLC0415  # optional dependency
-        except ModuleNotFoundError as error:
-            # Only absence of FlagEmbedding itself means the extra is missing.
-            # An installed-but-broken FlagEmbedding raises this too, naming the
-            # transitive module it could not find, and reporting that as "not
-            # installed" would send someone to reinstall an extra that is
-            # already there.
-            if (error.name or "").partition(".")[0] != "FlagEmbedding":
-                raise
-            raise MissingDependencyError(
-                "BGE-M3 requires FlagEmbedding: pip install 'local-rag[embeddings]'"
-            ) from error
 
         device = self._resolve_device()
         use_fp16 = self._use_fp16 if self._use_fp16 is not None else device.startswith("cuda")
