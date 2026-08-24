@@ -17,6 +17,7 @@ vector shape, sparse structure, and whether the right document ranks first.
 
 from __future__ import annotations
 
+import importlib.util
 import math
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,13 @@ import pytest
 if TYPE_CHECKING:
     from local_rag.embedding import Embedding
 
-pytest.importorskip("FlagEmbedding", reason="needs the embeddings extra")
+# `importorskip` would also skip when FlagEmbedding is installed but raises on
+# import — a broken environment would look identical to an absent one, and
+# these tests exist precisely to catch the real library misbehaving. Checking
+# for the spec answers "is it installed?" without executing it, so an install
+# that is present but broken fails loudly here instead of quietly skipping.
+if importlib.util.find_spec("FlagEmbedding") is None:
+    pytest.skip("needs the embeddings extra", allow_module_level=True)
 
 from local_rag.embedding import BgeM3Embedder
 
