@@ -220,12 +220,19 @@ def fake_torch(*, cuda_available: bool) -> ModuleType:
 
 
 class RecordingFlagModel:
-    """Captures the arguments BGEM3FlagModel would have been constructed with."""
+    """Captures the arguments BGEM3FlagModel would have been constructed with.
+
+    The signature deliberately mirrors FlagEmbedding 1.3 exactly rather than
+    absorbing ``**kwargs``. A permissive stub accepts any call and would have
+    hidden the fact that 1.2 named this argument ``device``; pinning the
+    parameter names here means changing the call site breaks the test rather
+    than only breaking at runtime against the real library.
+    """
 
     last: ClassVar[dict[str, Any]] = {}
 
-    def __init__(self, model_id: str, **kwargs: Any) -> None:
-        type(self).last = {"model_id": model_id, **kwargs}
+    def __init__(self, model_id: str, *, use_fp16: bool, devices: str) -> None:
+        type(self).last = {"model_id": model_id, "use_fp16": use_fp16, "devices": devices}
 
 
 def fake_flag_embedding() -> ModuleType:

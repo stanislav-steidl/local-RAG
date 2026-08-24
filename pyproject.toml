@@ -40,7 +40,10 @@ parsing = [
 # implementation and the only one that exposes the sparse head; it pulls in
 # torch and transformers, so the whole extra is opt-in.
 embeddings = [
-    "FlagEmbedding>=1.2",
+    # 1.3 renamed BGEM3FlagModel's `device` argument to `devices`. Resolving a
+    # 1.2.x release would install cleanly and then fail with a TypeError on the
+    # first model load, so the floor is a compatibility boundary, not a guess.
+    "FlagEmbedding>=1.3",
 ]
 # Vector storage and hybrid retrieval.
 store = [
