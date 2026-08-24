@@ -6,7 +6,7 @@ corpus appears anywhere in the test suite — see ``docs/decisions.md``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -20,7 +20,7 @@ from local_rag.models import (
     SourceType,
 )
 
-FIXED_TIME = datetime(2024, 3, 5, 12, 30, tzinfo=timezone.utc)
+FIXED_TIME = datetime(2024, 3, 5, 12, 30, tzinfo=UTC)
 
 
 def make_document_metadata(**overrides: Any) -> DocumentMetadata:

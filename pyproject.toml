@@ -7,7 +7,7 @@ name = "local-rag"
 version = "0.1.0"
 description = "A fully offline, local-first RAG system for searching a personal document corpus."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Stanislav Steidl" }]
 keywords = ["rag", "retrieval", "embeddings", "lancedb", "offline", "local-first"]
@@ -15,9 +15,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
 ]
@@ -89,14 +88,14 @@ packages = ["src/local_rag"]
 # ---------------------------------------------------------------------------
 [tool.black]
 line-length = 100
-target-version = ["py310"]
+target-version = ["py312"]
 
 # ---------------------------------------------------------------------------
 # Linting
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -152,7 +151,7 @@ known-first-party = ["local_rag"]
 # Type checking
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 # Resolve the package from source so type-checking works without an editable
 # install — notably inside pre-commit's isolated hook environment.
 mypy_path = "src"

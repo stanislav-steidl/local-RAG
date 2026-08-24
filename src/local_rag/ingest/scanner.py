@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -198,7 +198,7 @@ def build_document_metadata(path: Path, root: Path) -> DocumentMetadata:
         source_type=classify_source_type(path.suffix),
         file_extension=path.suffix.lower(),
         size_bytes=stat_result.st_size,
-        modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+        modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC),
         content_hash=compute_content_hash(path),
     )
 

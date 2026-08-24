@@ -20,7 +20,7 @@ across machines and cannot leak a home directory layout.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ __all__ = [
 ]
 
 
-class SourceType(str, Enum):
+class SourceType(StrEnum):
     """The kind of artefact a piece of retrievable text originated from.
 
     Photos are not yet ingested, but the field exists from the outset so that

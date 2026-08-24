@@ -78,7 +78,7 @@ committed by accident:
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.12+.
 
 ```bash
 git clone https://github.com/stanislav-steidl/local-RAG.git
@@ -128,7 +128,7 @@ black .             # format
 mypy                # type-check
 ```
 
-Quality gates are enforced in CI on Linux and Windows across Python 3.10–3.12. `main` is
+Quality gates are enforced in CI on Linux and Windows across Python 3.12–3.13. `main` is
 protected: every change arrives through a feature branch and must be green before merging.
 
 ## Roadmap
