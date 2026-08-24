@@ -132,7 +132,14 @@ class BgeM3Embedder(Embedder):
         """
         try:
             from FlagEmbedding import BGEM3FlagModel  # noqa: PLC0415  # optional dependency
-        except ImportError as error:
+        except ModuleNotFoundError as error:
+            # Only absence of FlagEmbedding itself means the extra is missing.
+            # An installed-but-broken FlagEmbedding raises this too, naming the
+            # transitive module it could not find, and reporting that as "not
+            # installed" would send someone to reinstall an extra that is
+            # already there.
+            if (error.name or "").partition(".")[0] != "FlagEmbedding":
+                raise
             raise MissingDependencyError(
                 "BGE-M3 requires FlagEmbedding: pip install 'local-rag[embeddings]'"
             ) from error

@@ -327,7 +327,7 @@ class TestMissingDependency:
 
         def refuse_flagembedding(name: str, *args: Any, **kwargs: Any) -> Any:
             if name == "FlagEmbedding":
-                raise ImportError("no FlagEmbedding")
+                raise ModuleNotFoundError("no FlagEmbedding", name="FlagEmbedding")
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", refuse_flagembedding)
@@ -336,4 +336,43 @@ class TestMissingDependency:
             caplog.at_level(logging.INFO),
             pytest.raises(MissingDependencyError, match=r"local-rag\[embeddings\]"),
         ):
+            BgeM3Embedder(device="cpu").embed_documents(["a"])
+
+    def test_a_broken_dependency_is_not_reported_as_a_missing_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An installed FlagEmbedding failing its own imports must surface as itself.
+
+        Reporting it as "FlagEmbedding is not installed" would send someone to
+        reinstall an extra that is already present, hiding the transitive
+        module that actually went missing.
+        """
+        real_import = builtins.__import__
+
+        def break_inside_flagembedding(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "FlagEmbedding":
+                raise ModuleNotFoundError("No module named 'peft'", name="peft")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", break_inside_flagembedding)
+
+        with pytest.raises(ModuleNotFoundError, match="peft") as excinfo:
+            BgeM3Embedder(device="cpu").embed_documents(["a"])
+
+        assert not isinstance(excinfo.value, MissingDependencyError)
+
+    def test_a_submodule_of_the_extra_still_counts_as_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`FlagEmbedding.inference` being absent still means the extra is unusable."""
+        real_import = builtins.__import__
+
+        def refuse_submodule(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "FlagEmbedding":
+                raise ModuleNotFoundError("gone", name="FlagEmbedding.inference")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", refuse_submodule)
+
+        with pytest.raises(MissingDependencyError, match=r"local-rag\[embeddings\]"):
             BgeM3Embedder(device="cpu").embed_documents(["a"])
