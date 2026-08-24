@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import timezone
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -194,7 +194,7 @@ class TestBuildDocumentMetadata:
     def test_modified_at_is_timezone_aware(self, corpus: Path) -> None:
         path = write(corpus, "a.pdf")
 
-        assert build_document_metadata(path, corpus).modified_at.tzinfo is timezone.utc
+        assert build_document_metadata(path, corpus).modified_at.tzinfo is UTC
 
     def test_extension_is_normalised_to_lowercase(self, corpus: Path) -> None:
         path = write(corpus, "shouty.PDF")
