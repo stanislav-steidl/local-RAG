@@ -36,6 +36,7 @@ import lancedb
 import pyarrow as pa
 
 DIMENSION = 8
+MODEL_ID = "test/embedder"
 
 
 def make_embedding(seed: float = 1.0, *, sparse: bool = True) -> Embedding:
@@ -70,7 +71,7 @@ def make_stored_chunk(
 @pytest.fixture
 def store(tmp_path: Path) -> LanceChunkStore:
     """An empty store on a temporary database."""
-    return LanceChunkStore(tmp_path / "index", dimension=DIMENSION)
+    return LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id=MODEL_ID)
 
 
 class TestChunkId:
@@ -89,19 +90,19 @@ class TestChunkId:
 class TestSchema:
     def test_dense_vectors_are_fixed_width(self) -> None:
         """LanceDB indexes fixed-size lists; a variable list could not be indexed."""
-        field = build_schema(16).field("vector")
+        field = build_schema(16, MODEL_ID).field("vector")
 
         assert field.type.list_size == 16
 
     def test_page_columns_are_nullable(self) -> None:
         """DOCX and plain text have no page numbers at all."""
-        schema = build_schema(4)
+        schema = build_schema(4, MODEL_ID)
 
         assert schema.field("page_number").nullable
         assert schema.field("page_count").nullable
 
     def test_provenance_columns_are_not_nullable(self) -> None:
-        schema = build_schema(4)
+        schema = build_schema(4, MODEL_ID)
 
         assert not schema.field("relative_path").nullable
         assert not schema.field("content_hash").nullable
@@ -109,7 +110,19 @@ class TestSchema:
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_dimension_is_rejected(self, bad: int) -> None:
         with pytest.raises(ValueError, match="dimension must be positive"):
-            build_schema(bad)
+            build_schema(bad, MODEL_ID)
+
+    def test_an_empty_model_id_is_rejected(self) -> None:
+        """An unnamed embedder cannot be checked against on reopen."""
+        with pytest.raises(ValueError, match="model_id must not be empty"):
+            build_schema(4, "")
+
+    def test_the_embedder_is_recorded_in_the_schema(self) -> None:
+        """Reopening compares against this; width alone does not identify a model."""
+        metadata = build_schema(4, "BAAI/bge-m3").metadata
+
+        assert metadata[b"local_rag.embedding_model"] == b"BAAI/bge-m3"
+        assert metadata[b"local_rag.embedding_dimension"] == b"4"
 
 
 class TestRecordConversion:
@@ -166,6 +179,41 @@ class TestRecordConversion:
         first = to_record(make_stored_chunk(), make_embedding())
         assert json.loads(first["extra_json"]) == {}
 
+    def test_metadata_json_cannot_represent_is_rejected(self) -> None:
+        """Coercing it would change provenance type between store and retrieve.
+
+        `default=str` would accept anything and hand back a string where a
+        datetime went in, with nothing at read time to reveal the substitution.
+        """
+        chunk = Chunk(
+            page_content="text",
+            metadata=ChunkMetadata(
+                document=make_document_metadata(extra={"taken": datetime(2024, 3, 5, tzinfo=UTC)}),
+                chunk_index=0,
+                start_char=0,
+                end_char=4,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="JSON cannot represent"):
+            to_record(chunk, make_embedding())
+
+    def test_a_tuple_in_metadata_returns_as_a_list(self) -> None:
+        """JSON has one sequence type; this is documented rather than hidden."""
+        chunk = Chunk(
+            page_content="text",
+            metadata=ChunkMetadata(
+                document=make_document_metadata(extra={"gps": (50.08, 14.44)}),
+                chunk_index=0,
+                start_char=0,
+                end_char=4,
+            ),
+        )
+
+        restored = record_to_chunk(to_record(chunk, make_embedding()))
+
+        assert restored.metadata.document.extra == {"gps": [50.08, 14.44]}
+
 
 class TestStoreLifecycle:
     def test_a_new_store_is_empty(self, store: LanceChunkStore) -> None:
@@ -174,25 +222,25 @@ class TestStoreLifecycle:
     def test_reopening_keeps_the_data(self, tmp_path: Path) -> None:
         """Resumption across process restarts depends on exactly this."""
         path = tmp_path / "index"
-        first = LanceChunkStore(path, dimension=DIMENSION)
+        first = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
         first.add_document([make_stored_chunk()], [make_embedding()])
 
-        reopened = LanceChunkStore(path, dimension=DIMENSION)
+        reopened = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
         assert reopened.count() == 1
 
     def test_reopening_with_a_different_width_is_rejected(self, tmp_path: Path) -> None:
         """Otherwise this fails deep inside Arrow, far from the actual cause."""
         path = tmp_path / "index"
-        LanceChunkStore(path, dimension=DIMENSION)
+        LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
         with pytest.raises(ValueError, match="embedding model has changed"):
-            LanceChunkStore(path, dimension=DIMENSION + 1)
+            LanceChunkStore(path, dimension=DIMENSION + 1, model_id=MODEL_ID)
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_dimension_is_rejected(self, tmp_path: Path, bad: int) -> None:
         with pytest.raises(ValueError, match="dimension must be positive"):
-            LanceChunkStore(tmp_path / "index", dimension=bad)
+            LanceChunkStore(tmp_path / "index", dimension=bad, model_id=MODEL_ID)
 
     def test_repr_identifies_the_table(self, store: LanceChunkStore) -> None:
         assert "chunks" in repr(store)
@@ -200,7 +248,7 @@ class TestStoreLifecycle:
 
     def test_exposes_its_dimension_and_path(self, tmp_path: Path) -> None:
         path = tmp_path / "index"
-        opened = LanceChunkStore(path, dimension=DIMENSION)
+        opened = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
         assert opened.dimension == DIMENSION
         assert opened.path == path
@@ -226,9 +274,54 @@ class TestStoreLifecycle:
         )
 
         with pytest.raises(ValueError, match="missing columns") as excinfo:
-            LanceChunkStore(path, dimension=DIMENSION)
+            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
         assert "embedding model has changed" not in str(excinfo.value)
+
+    def test_a_table_from_a_different_model_is_rejected(self, tmp_path: Path) -> None:
+        """Width is structural compatibility, not identity.
+
+        Two embedders can both emit vectors of this width that occupy entirely
+        different spaces. Mixing them passes every structural check, then
+        compares incomparable vectors while reporting the older documents as
+        already indexed, so they are never re-embedded.
+        """
+        path = tmp_path / "index"
+        LanceChunkStore(path, dimension=DIMENSION, model_id="first/model")
+
+        with pytest.raises(ValueError, match="not comparable"):
+            LanceChunkStore(path, dimension=DIMENSION, model_id="second/model")
+
+    def test_a_table_that_records_no_model_is_rejected(self, tmp_path: Path) -> None:
+        """Unverifiable is not the same as compatible."""
+        path = tmp_path / "index"
+        connection = lancedb.connect(str(path))
+        connection.create_table(
+            "chunks", schema=build_schema(DIMENSION, MODEL_ID).remove_metadata()
+        )
+
+        with pytest.raises(ValueError, match="does not record which embedder"):
+            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+
+    def test_an_empty_model_id_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="model_id must not be empty"):
+            LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id="")
+
+    def test_a_column_of_the_wrong_type_is_rejected(self, tmp_path: Path) -> None:
+        """Matching names are not compatibility; this would fail on first write."""
+        path = tmp_path / "index"
+        fields = [
+            pa.field("text", pa.int64()) if field.name == "text" else field
+            for field in build_schema(DIMENSION, MODEL_ID)
+        ]
+        connection = lancedb.connect(str(path))
+        connection.create_table(
+            "chunks",
+            schema=pa.schema(fields, metadata=build_schema(DIMENSION, MODEL_ID).metadata),
+        )
+
+        with pytest.raises(ValueError, match="incompatible column types"):
+            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
     def test_an_unexpected_open_failure_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -247,7 +340,7 @@ class TestStoreLifecycle:
         monkeypatch.setattr(lancedb, "connect", lambda _uri: RefusingConnection())
 
         with pytest.raises(ValueError, match="Permission denied"):
-            LanceChunkStore(tmp_path / "index", dimension=DIMENSION)
+            LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id=MODEL_ID)
 
     def test_a_foreign_table_is_reported_clearly(self, tmp_path: Path) -> None:
         """Pointing at someone else's database should say so, not raise KeyError.
@@ -260,7 +353,7 @@ class TestStoreLifecycle:
         connection.create_table("chunks", schema=pa.schema([pa.field("x", pa.int32())]))
 
         with pytest.raises(ValueError, match="was not created by this store"):
-            LanceChunkStore(path, dimension=DIMENSION)
+            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
 
 
 class TestAdding:
@@ -317,6 +410,59 @@ class TestAdding:
                     make_stored_chunk(content_hash="a" * 64),
                     make_stored_chunk(content_hash="b" * 64),
                 ],
+                [make_embedding(), make_embedding(2.0)],
+            )
+
+    def test_a_shorter_rewrite_drops_the_chunks_it_no_longer_has(
+        self, store: LanceChunkStore
+    ) -> None:
+        """An edited document must replace its chunks, not merge into them.
+
+        An upsert alone leaves the trailing chunk of the previous version in
+        place: stale text, still retrievable, inside a document that reports
+        itself complete.
+        """
+        store.add_document(
+            [make_stored_chunk(f"chunk {index}", index=index) for index in range(3)],
+            [make_embedding(float(index)) for index in range(3)],
+        )
+
+        store.add_document(
+            [make_stored_chunk(f"rewritten {index}", index=index) for index in range(2)],
+            [make_embedding(float(index)) for index in range(2)],
+        )
+
+        assert store.count() == 2
+        assert sorted(row["text"] for row in store.to_records()) == [
+            "rewritten 0",
+            "rewritten 1",
+        ]
+
+    def test_a_shorter_rewrite_leaves_other_documents_alone(self, store: LanceChunkStore) -> None:
+        """The deletion is scoped to the document being written."""
+        store.add_document(
+            [make_stored_chunk(index=index, content_hash="b" * 64) for index in range(2)],
+            [make_embedding(float(index)) for index in range(2)],
+        )
+        store.add_document(
+            [make_stored_chunk(index=index) for index in range(3)],
+            [make_embedding(float(index)) for index in range(3)],
+        )
+
+        store.add_document([make_stored_chunk()], [make_embedding()])
+
+        assert store.indexed_content_hashes() == {"a" * 64, "b" * 64}
+        assert store.count() == 3
+
+    def test_repeated_chunk_positions_are_rejected(self, store: LanceChunkStore) -> None:
+        """Two chunks at one position derive the same id, which breaks the merge.
+
+        LanceDB documents multiple matches on a merge key as undefined, so this
+        could duplicate rows and corrupt every later upsert of the document.
+        """
+        with pytest.raises(ValueError, match="positions must be unique"):
+            store.add_document(
+                [make_stored_chunk(index=0), make_stored_chunk(index=0)],
                 [make_embedding(), make_embedding(2.0)],
             )
 

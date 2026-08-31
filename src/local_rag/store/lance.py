@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from local_rag.errors import optional_dependency
-from local_rag.store.schema import build_schema, to_record
+from local_rag.store.schema import EMBEDDING_MODEL_KEY, build_schema, to_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -57,24 +57,29 @@ class LanceChunkStore:
         path: Path,
         *,
         dimension: int,
+        model_id: str,
         table_name: str = DEFAULT_TABLE_NAME,
     ) -> None:
         """Open or create a store.
 
         Args:
             path: Directory holding the database.
-            dimension: Width of the dense vectors to be stored. A table built
-                for one width cannot hold another's vectors, so this is fixed
-                at creation and checked on reopen.
+            dimension: Width of the dense vectors to be stored.
+            model_id: Identifier of the embedder producing them. Recorded at
+                creation and checked on reopen, because width alone does not
+                identify a model: two embedders can both emit 1024-wide vectors
+                that mean different things.
             table_name: Table to read and write.
 
         Raises:
-            ValueError: If ``dimension`` is not positive, or an existing table
-                was built for a different width.
+            ValueError: If ``dimension`` is not positive, ``model_id`` is
+                empty, or an existing table was built by a different embedder.
             MissingDependencyError: If LanceDB is not installed.
         """
         if dimension <= 0:
             raise ValueError(f"dimension must be positive, got {dimension}")
+        if not model_id:
+            raise ValueError("model_id must not be empty")
 
         with optional_dependency(
             "lancedb",
@@ -84,6 +89,7 @@ class LanceChunkStore:
 
         self._path = path
         self._dimension = dimension
+        self._model_id = model_id
         self._table_name = table_name
         self._connection = lancedb.connect(str(path))
 
@@ -96,10 +102,13 @@ class LanceChunkStore:
         except ValueError as error:
             if _TABLE_NOT_FOUND not in str(error).lower():
                 raise
-            self._table = self._connection.create_table(table_name, schema=build_schema(dimension))
-            logger.debug("Created table %r in %s", table_name, path)
+            self._table = self._connection.create_table(
+                table_name, schema=build_schema(dimension, model_id)
+            )
+            logger.debug("Created table %r in %s for %s", table_name, path, model_id)
         else:
             self._check_schema()
+            self._check_embedder()
 
     def _check_schema(self) -> None:
         """Reject an existing table this store cannot write to.
@@ -115,7 +124,7 @@ class LanceChunkStore:
                 does not have the columns this store writes.
         """
         stored = self._table.schema
-        expected = build_schema(self._dimension)
+        expected = build_schema(self._dimension, self._model_id)
 
         if "vector" in stored.names:
             width = getattr(stored.field("vector").type, "list_size", None)
@@ -132,6 +141,52 @@ class LanceChunkStore:
                 f"table {self._table_name!r} in {self._path} is missing columns "
                 f"{missing}, so it was not created by this store; point at a different "
                 f"directory or table"
+            )
+
+        # Names alone are not compatibility. A `text` column typed int64, or a
+        # variable-length `vector`, accepts construction and then fails inside
+        # Arrow on the first write — which is the failure this check exists to
+        # pre-empt.
+        wrong_types = [
+            f"{field.name}: expected {field.type}, found {stored.field(field.name).type}"
+            for field in expected
+            if stored.field(field.name).type != field.type
+        ]
+        if wrong_types:
+            raise ValueError(
+                f"table {self._table_name!r} in {self._path} has incompatible column "
+                f"types ({'; '.join(wrong_types)}); it cannot be written by this store"
+            )
+
+    def _check_embedder(self) -> None:
+        """Reject a table built by a different embedder.
+
+        Vector width is structural compatibility, not identity: two models can
+        both emit 1024-wide vectors that occupy entirely different spaces.
+        Writing one into a table of the other passes every structural check,
+        and then similarity scores compare things that are not comparable while
+        :meth:`indexed_content_hashes` reports the older documents as done, so
+        they are never re-embedded.
+
+        Raises:
+            ValueError: If the table records a different embedder, or none at
+                all.
+        """
+        metadata = self._table.schema.metadata or {}
+        stored = metadata.get(EMBEDDING_MODEL_KEY)
+
+        if stored is None:
+            raise ValueError(
+                f"table {self._table_name!r} in {self._path} does not record which "
+                f"embedder built it, so its vectors cannot be shown to be comparable "
+                f"with {self._model_id!r}; rebuild the index"
+            )
+
+        if stored.decode() != self._model_id:
+            raise ValueError(
+                f"table {self._table_name!r} was built with {stored.decode()!r} but "
+                f"{self._model_id!r} was requested; their vectors are not comparable "
+                f"and the index must be rebuilt"
             )
 
     @property
@@ -190,6 +245,18 @@ class LanceChunkStore:
                 f"from complete ones"
             )
 
+        # Chunk ids are derived from position, and ChunkMetadata does not
+        # forbid repeating one. Two chunks sharing an index would produce two
+        # rows with the same id, which LanceDB documents as undefined for a
+        # merge and which would corrupt every later upsert of this document.
+        positions = [chunk.metadata.chunk_index for chunk in chunks]
+        repeated = sorted({index for index in positions if positions.count(index) > 1})
+        if repeated:
+            raise ValueError(
+                f"chunk positions must be unique within a document, but {repeated} "
+                f"repeat; their derived ids would collide"
+            )
+
         wrong = sorted(
             {
                 embedding.dimension
@@ -205,10 +272,17 @@ class LanceChunkStore:
         rows = [
             to_record(chunk, embedding) for chunk, embedding in zip(chunks, embeddings, strict=True)
         ]
+        # Deleting rows of this document that the new version does not contain
+        # is the difference between replacing a document and merging into it. A
+        # file edited from three chunks to two would otherwise keep its third
+        # chunk: stale text, still retrievable, in a document reported complete.
+        # Scoped to this content hash so the merge cannot touch anything else,
+        # and part of the same commit so it cannot half-happen.
         (
             self._table.merge_insert("chunk_id")
             .when_matched_update_all()
             .when_not_matched_insert_all()
+            .when_not_matched_by_source_delete(f"content_hash = '{_escape(next(iter(hashes)))}'")
             .execute(rows)
         )
         return len(rows)
