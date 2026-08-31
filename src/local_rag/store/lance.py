@@ -262,12 +262,11 @@ class LanceChunkStore:
         if not chunks:
             return 0
 
-        hashes = {chunk.metadata.document.content_hash for chunk in chunks}
-        if len(hashes) > 1:
+        document = chunks[0].metadata.document
+        if any(chunk.metadata.document != document for chunk in chunks[1:]):
             raise ValueError(
-                f"add_document stores one document per call, but was given {len(hashes)}; "
-                f"writing them together would make partial writes indistinguishable "
-                f"from complete ones"
+                "add_document stores one document per call, but chunks with "
+                "different document metadata were provided"
             )
 
         # Chunk ids are derived from position, and ChunkMetadata does not
