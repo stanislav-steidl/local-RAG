@@ -320,8 +320,45 @@ class TestStoreLifecycle:
             schema=pa.schema(fields, metadata=build_schema(DIMENSION, MODEL_ID).metadata),
         )
 
-        with pytest.raises(ValueError, match="incompatible column types"):
+        with pytest.raises(ValueError, match="incompatible columns"):
             LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+
+    def test_a_column_with_the_wrong_nullability_is_rejected(self, tmp_path: Path) -> None:
+        """Nullability is separate from type in Arrow, and equally fatal.
+
+        A non-null ``page_number`` accepts construction and then rejects the
+        None that DOCX and plain text legitimately produce — on the first
+        write, which is exactly the late failure this check exists to prevent.
+        """
+        path = tmp_path / "index"
+        expected = build_schema(DIMENSION, MODEL_ID)
+        fields = [
+            (
+                pa.field(field.name, field.type, nullable=False)
+                if field.name == "page_number"
+                else field
+            )
+            for field in expected
+        ]
+        connection = lancedb.connect(str(path))
+        connection.create_table("chunks", schema=pa.schema(fields, metadata=expected.metadata))
+
+        with pytest.raises(ValueError, match="nullable"):
+            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+
+    def test_the_recorded_embedder_survives_a_real_reopen(self, tmp_path: Path) -> None:
+        """The model check is worthless if LanceDB does not persist the metadata.
+
+        Asserting it on `build_schema` output alone would test PyArrow, not the
+        database this store actually depends on.
+        """
+        path = tmp_path / "index"
+        LanceChunkStore(path, dimension=DIMENSION, model_id="BAAI/bge-m3")
+
+        reopened = lancedb.connect(str(path)).open_table("chunks")
+
+        assert reopened.schema.metadata[b"local_rag.embedding_model"] == b"BAAI/bge-m3"
+        assert reopened.schema.metadata[b"local_rag.embedding_dimension"] == str(DIMENSION).encode()
 
     def test_an_unexpected_open_failure_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

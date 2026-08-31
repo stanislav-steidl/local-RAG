@@ -147,15 +147,27 @@ class LanceChunkStore:
         # variable-length `vector`, accepts construction and then fails inside
         # Arrow on the first write — which is the failure this check exists to
         # pre-empt.
-        wrong_types = [
-            f"{field.name}: expected {field.type}, found {stored.field(field.name).type}"
-            for field in expected
-            if stored.field(field.name).type != field.type
-        ]
-        if wrong_types:
+        #
+        # Nullability is part of that, and separate from the type in Arrow. A
+        # `page_number` declared non-null would reject the None that DOCX and
+        # plain text legitimately produce, again only on the first write; a
+        # required column declared nullable would hand None to converters that
+        # assume a value is there.
+        incompatible: list[str] = []
+        for field in expected:
+            found = stored.field(field.name)
+            if found.type != field.type:
+                incompatible.append(f"{field.name}: expected type {field.type}, found {found.type}")
+            elif found.nullable != field.nullable:
+                incompatible.append(
+                    f"{field.name}: expected nullable={field.nullable}, "
+                    f"found nullable={found.nullable}"
+                )
+
+        if incompatible:
             raise ValueError(
-                f"table {self._table_name!r} in {self._path} has incompatible column "
-                f"types ({'; '.join(wrong_types)}); it cannot be written by this store"
+                f"table {self._table_name!r} in {self._path} has incompatible columns "
+                f"({'; '.join(incompatible)}); it cannot be written by this store"
             )
 
     def _check_embedder(self) -> None:
