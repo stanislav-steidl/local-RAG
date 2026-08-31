@@ -591,7 +591,10 @@ class TestAdding:
         )
 
         store.add_document(
-            [make_stored_chunk(f"rewritten {index}", index=index) for index in range(2)],
+            [
+                make_stored_chunk(f"rewritten {index}", index=index, content_hash="b" * 64)
+                for index in range(2)
+            ],
             [make_embedding(float(index)) for index in range(2)],
         )
 
@@ -604,7 +607,7 @@ class TestAdding:
     def test_a_shorter_rewrite_leaves_other_documents_alone(self, store: LanceChunkStore) -> None:
         """The deletion is scoped to the document being written."""
         store.add_document(
-            [make_stored_chunk(index=index, content_hash="b" * 64) for index in range(2)],
+            [make_stored_chunk(index=index, content_hash="b" * 64, path="other.pdf") for index in range(2)],
             [make_embedding(float(index)) for index in range(2)],
         )
         store.add_document(

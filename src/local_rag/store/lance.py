@@ -302,13 +302,14 @@ class LanceChunkStore:
         # is the difference between replacing a document and merging into it. A
         # file edited from three chunks to two would otherwise keep its third
         # chunk: stale text, still retrievable, in a document reported complete.
-        # Scoped to this content hash so the merge cannot touch anything else,
-        # and part of the same commit so it cannot half-happen.
+        # Scoped to this path so only earlier versions of this document are
+        # touched, and part of the same commit so it cannot half-happen.
+        relative_path = _escape(chunks[0].metadata.document.relative_path)
         (
             self._table.merge_insert("chunk_id")
             .when_matched_update_all()
             .when_not_matched_insert_all()
-            .when_not_matched_by_source_delete(f"content_hash = '{_escape(next(iter(hashes)))}'")
+            .when_not_matched_by_source_delete(f"relative_path = '{relative_path}'")
             .execute(rows)
         )
         return len(rows)
