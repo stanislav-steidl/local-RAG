@@ -2,13 +2,17 @@
 
 Writing is the expensive half of this pipeline: embedding a corpus of a few
 thousand chunks costs hours on a CPU. The store is therefore built around
-resumption rather than around throughput — it can say what it already holds, so
-a run that dies at ninety percent picks up where it stopped instead of starting
-over.
+resumption rather than around throughput — it can say which documents it
+already holds, so a run that dies at ninety percent picks up where it stopped.
+
+That guarantee is only worth having if it is exact, which drives two decisions.
+Writes are **per document and atomic**: a document's chunks are committed in a
+single operation, so a hash that is present is a document that is complete.
+And writes are **upserts** keyed on the derived chunk id, so retrying a
+document replaces its rows instead of duplicating them.
 
 Search lives in the retrieval stage, not here. This module answers "what is
-stored, and how do I change it"; ranking is a separate concern with its own
-design questions.
+stored, and how do I change it"; ranking is a separate concern.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from local_rag.errors import optional_dependency
 from local_rag.store.schema import build_schema, to_record
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from local_rag.embedding import Embedding
@@ -34,6 +38,10 @@ logger = logging.getLogger(__name__)
 #: nothing yet needs two tables in one database, and a name that can vary is a
 #: name that can be got wrong.
 DEFAULT_TABLE_NAME = "chunks"
+
+#: LanceDB signals an absent table with a plain ValueError, so the message is
+#: the only thing distinguishing it from a permission or I/O failure.
+_TABLE_NOT_FOUND = "not found"
 
 
 class LanceChunkStore:
@@ -79,53 +87,51 @@ class LanceChunkStore:
         self._table_name = table_name
         self._connection = lancedb.connect(str(path))
 
-        # `exist_ok` opens the table when it is already there and creates it
-        # otherwise, which is exactly the open-or-create this needs. The
-        # alternative — listing tables first — reads a paginated response, so a
-        # database with many tables could report a table absent merely because
-        # it fell beyond the first page.
+        # Open first, create only on a genuine absence. Creating with
+        # `exist_ok` instead would surface a width mismatch as LanceDB's own
+        # "schemas disagree", and catching that broadly would swallow
+        # permission and I/O failures too.
         try:
-            self._table = self._connection.create_table(
-                table_name, schema=build_schema(dimension), exist_ok=True
-            )
-        except Exception:
-            # An existing table whose schema differs. LanceDB reports only that
-            # the schemas disagree, which does not say what to do about it; the
-            # overwhelmingly likely cause is a changed embedding model, so open
-            # the table and say so in those terms.
             self._table = self._connection.open_table(table_name)
-            self._check_dimension()
-            raise  # Same width, so the schemas differ for some other reason.
+        except ValueError as error:
+            if _TABLE_NOT_FOUND not in str(error).lower():
+                raise
+            self._table = self._connection.create_table(table_name, schema=build_schema(dimension))
+            logger.debug("Created table %r in %s", table_name, path)
+        else:
+            self._check_schema()
 
-        self._check_dimension()
-        logger.debug("Opened table %r in %s", table_name, path)
+    def _check_schema(self) -> None:
+        """Reject an existing table this store cannot write to.
 
-    def _check_dimension(self) -> None:
-        """Reject a table whose vectors are a different width than expected.
-
-        Writing 1024-wide vectors into a table built for 768 fails somewhere
-        inside Arrow with a message about list lengths. Catching it here says
-        what actually happened: the embedding model changed, and the index
-        needs rebuilding.
+        Opening rather than creating means LanceDB never compares schemas for
+        us, so a mismatch would otherwise surface as an Arrow error on the
+        first write — long after the point where it could be explained. The
+        vector width is checked first because a changed embedding model is by
+        far the likeliest cause and has a specific remedy.
 
         Raises:
-            ValueError: If the stored width differs from the configured one, or
-                the table has no vector column at all.
+            ValueError: If the table stores vectors of a different width, or
+                does not have the columns this store writes.
         """
-        try:
-            field = self._table.schema.field("vector")
-        except KeyError:
-            raise ValueError(
-                f"table {self._table_name!r} in {self._path} has no 'vector' column, so it "
-                f"was not created by this store; point at a different directory or table"
-            ) from None
+        stored = self._table.schema
+        expected = build_schema(self._dimension)
 
-        stored = getattr(field.type, "list_size", None)
-        if stored is not None and stored != self._dimension:
+        if "vector" in stored.names:
+            width = getattr(stored.field("vector").type, "list_size", None)
+            if width is not None and width != self._dimension:
+                raise ValueError(
+                    f"table {self._table_name!r} stores {width}-dimensional vectors but "
+                    f"{self._dimension} was requested; the embedding model has changed "
+                    f"and the index must be rebuilt"
+                )
+
+        missing = [field.name for field in expected if field.name not in stored.names]
+        if missing:
             raise ValueError(
-                f"table {self._table_name!r} stores {stored}-dimensional vectors but "
-                f"{self._dimension} was requested; the embedding model has changed and "
-                f"the index must be rebuilt"
+                f"table {self._table_name!r} in {self._path} is missing columns "
+                f"{missing}, so it was not created by this store; point at a different "
+                f"directory or table"
             )
 
     @property
@@ -142,21 +148,31 @@ class LanceChunkStore:
         """Number of chunks stored."""
         return int(self._table.count_rows())
 
-    def add(self, chunks: Sequence[Chunk], embeddings: Sequence[Embedding]) -> int:
-        """Store chunks together with their embeddings.
+    def add_document(self, chunks: Sequence[Chunk], embeddings: Sequence[Embedding]) -> int:
+        """Store every chunk of one document, in a single commit.
+
+        One document per call, deliberately. Splitting a document across
+        several writes would let a crash leave it half stored, and since
+        :meth:`indexed_content_hashes` reports a document as done once its rows
+        exist, the remainder would be skipped for good on the next run —
+        silently losing content rather than failing.
+
+        Rows are upserted on ``chunk_id``, so retrying a document that was
+        partially or fully written replaces its rows rather than duplicating
+        them. LanceDB does not enforce uniqueness itself; a derived identifier
+        alone would not prevent duplicates.
 
         Args:
-            chunks: Chunks to store.
+            chunks: Every chunk of one document.
             embeddings: Their embeddings, in the same order.
 
         Returns:
             The number of rows written.
 
         Raises:
-            ValueError: If the two sequences differ in length, or an embedding
-                is not the width this store was built for. Both would otherwise
-                surface as an Arrow error far from the cause — or worse, pair a
-                chunk with another chunk's vector.
+            ValueError: If the sequences differ in length, an embedding is not
+                the width this store holds, or the chunks come from more than
+                one document.
         """
         if len(chunks) != len(embeddings):
             raise ValueError(
@@ -166,37 +182,59 @@ class LanceChunkStore:
         if not chunks:
             return 0
 
-        wrong = [
-            embedding.dimension
-            for embedding in embeddings
-            if embedding.dimension != self._dimension
-        ]
+        hashes = {chunk.metadata.document.content_hash for chunk in chunks}
+        if len(hashes) > 1:
+            raise ValueError(
+                f"add_document stores one document per call, but was given {len(hashes)}; "
+                f"writing them together would make partial writes indistinguishable "
+                f"from complete ones"
+            )
+
+        wrong = sorted(
+            {
+                embedding.dimension
+                for embedding in embeddings
+                if embedding.dimension != self._dimension
+            }
+        )
         if wrong:
             raise ValueError(
-                f"store holds {self._dimension}-dimensional vectors but was given "
-                f"{sorted(set(wrong))}"
+                f"store holds {self._dimension}-dimensional vectors but was given {wrong}"
             )
 
         rows = [
             to_record(chunk, embedding) for chunk, embedding in zip(chunks, embeddings, strict=True)
         ]
-        self._table.add(rows)
+        (
+            self._table.merge_insert("chunk_id")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(rows)
+        )
         return len(rows)
 
     def indexed_content_hashes(self) -> set[str]:
-        """Return the content hashes already stored.
+        """Return the content hashes of documents already stored.
 
         This is what makes an interrupted run resumable: the indexer skips any
-        document whose hash is already present, and a document that changed has
-        a different hash, so it is not mistaken for one that is done.
+        document whose hash is present, and a document that changed hashes
+        differently, so it is never mistaken for one that is done. The answer
+        is only trustworthy because :meth:`add_document` commits a whole
+        document at once.
 
         Returns:
             Every distinct ``content_hash`` in the table.
         """
         if self.count() == 0:
             return set()
-        table = self._table.to_arrow()
-        return {str(value) for value in table.column("content_hash").to_pylist()}
+
+        # Project a single column. `to_arrow()` would materialise every dense
+        # and sparse vector merely to read a string, which on the multi-gigabyte
+        # indexes this design targets means reading the whole index to answer a
+        # question about its keys. `limit(0)` means no limit; the default is 10,
+        # which would silently truncate.
+        projected = self._table.search(None).select(["content_hash"]).limit(0).to_arrow()
+        return {str(value) for value in projected.column("content_hash").to_pylist()}
 
     def delete_document(self, content_hash: str) -> None:
         """Remove every chunk belonging to one version of a document.
@@ -250,35 +288,3 @@ def _escape(value: str) -> str:
         apostrophe cannot terminate the string early.
     """
     return value.replace("'", "''")
-
-
-def iter_batches(
-    chunks: Sequence[Chunk], embeddings: Sequence[Embedding], size: int
-) -> Iterable[tuple[Sequence[Chunk], Sequence[Embedding]]]:
-    """Yield aligned slices of chunks and embeddings.
-
-    Writing an entire corpus in one call would hold every vector in memory at
-    once; a few thousand 1024-wide float32 vectors is tolerable, a few hundred
-    thousand is not.
-
-    Args:
-        chunks: Chunks to slice.
-        embeddings: Their embeddings, in the same order.
-        size: Maximum rows per slice.
-
-    Yields:
-        Pairs of corresponding slices.
-
-    Raises:
-        ValueError: If ``size`` is not positive or the inputs differ in length.
-    """
-    if size <= 0:
-        raise ValueError(f"size must be positive, got {size}")
-    if len(chunks) != len(embeddings):
-        raise ValueError(
-            f"got {len(chunks)} chunks and {len(embeddings)} embeddings; "
-            f"they must correspond one to one"
-        )
-
-    for offset in range(0, len(chunks), size):
-        yield chunks[offset : offset + size], embeddings[offset : offset + size]

@@ -20,7 +20,6 @@ from local_rag.store import (
     LanceChunkStore,
     build_schema,
     chunk_id,
-    iter_batches,
     record_to_chunk,
     record_to_embedding,
     to_record,
@@ -176,7 +175,7 @@ class TestStoreLifecycle:
         """Resumption across process restarts depends on exactly this."""
         path = tmp_path / "index"
         first = LanceChunkStore(path, dimension=DIMENSION)
-        first.add([make_stored_chunk()], [make_embedding()])
+        first.add_document([make_stored_chunk()], [make_embedding()])
 
         reopened = LanceChunkStore(path, dimension=DIMENSION)
 
@@ -226,10 +225,29 @@ class TestStoreLifecycle:
             ),
         )
 
-        with pytest.raises(Exception, match=r"[Ss]chema") as excinfo:
+        with pytest.raises(ValueError, match="missing columns") as excinfo:
             LanceChunkStore(path, dimension=DIMENSION)
 
         assert "embedding model has changed" not in str(excinfo.value)
+
+    def test_an_unexpected_open_failure_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission or I/O error is not an absent table.
+
+        LanceDB reports both as a plain ValueError, so treating every one as
+        "missing" would try to create the table, fail differently, and report a
+        cause that has nothing to do with what went wrong.
+        """
+
+        class RefusingConnection:
+            def open_table(self, name: str) -> object:
+                raise ValueError("Permission denied while opening table")
+
+        monkeypatch.setattr(lancedb, "connect", lambda _uri: RefusingConnection())
+
+        with pytest.raises(ValueError, match="Permission denied"):
+            LanceChunkStore(tmp_path / "index", dimension=DIMENSION)
 
     def test_a_foreign_table_is_reported_clearly(self, tmp_path: Path) -> None:
         """Pointing at someone else's database should say so, not raise KeyError.
@@ -247,7 +265,7 @@ class TestStoreLifecycle:
 
 class TestAdding:
     def test_writes_rows(self, store: LanceChunkStore) -> None:
-        written = store.add(
+        written = store.add_document(
             [make_stored_chunk(index=0), make_stored_chunk(index=1)],
             [make_embedding(1.0), make_embedding(2.0)],
         )
@@ -256,27 +274,77 @@ class TestAdding:
         assert store.count() == 2
 
     def test_adding_nothing_is_a_no_op(self, store: LanceChunkStore) -> None:
-        assert store.add([], []) == 0
+        assert store.add_document([], []) == 0
         assert store.count() == 0
 
     def test_an_empty_store_returns_no_records(self, store: LanceChunkStore) -> None:
         assert store.to_records() == []
 
+    def test_rewriting_a_document_replaces_rather_than_duplicates(
+        self, store: LanceChunkStore
+    ) -> None:
+        """LanceDB does not enforce uniqueness, so a derived id alone proves nothing.
+
+        Retrying an interrupted document — the ordinary case for a two-hour
+        indexing run — would otherwise double every row it had already written.
+        """
+        chunks = [make_stored_chunk(index=index) for index in range(3)]
+        embeddings = [make_embedding(float(index)) for index in range(3)]
+        store.add_document(chunks, embeddings)
+
+        store.add_document(chunks, embeddings)
+
+        assert store.count() == 3
+
+    def test_rewriting_a_document_updates_its_text(self, store: LanceChunkStore) -> None:
+        """An upsert must replace the row, not silently keep the older copy."""
+        store.add_document([make_stored_chunk("before")], [make_embedding()])
+
+        store.add_document([make_stored_chunk("after")], [make_embedding()])
+
+        assert [row["text"] for row in store.to_records()] == ["after"]
+
+    def test_chunks_from_several_documents_are_rejected(self, store: LanceChunkStore) -> None:
+        """One commit per document is what makes a stored hash mean "complete".
+
+        Writing two documents together would let a crash leave one of them
+        half-stored while its hash reads as done, and the remainder would be
+        skipped for good on the next run.
+        """
+        with pytest.raises(ValueError, match="one document per call"):
+            store.add_document(
+                [
+                    make_stored_chunk(content_hash="a" * 64),
+                    make_stored_chunk(content_hash="b" * 64),
+                ],
+                [make_embedding(), make_embedding(2.0)],
+            )
+
+    def test_a_document_is_committed_in_full_or_not_at_all(self, store: LanceChunkStore) -> None:
+        """Every chunk lands together, so a present hash is never a partial document."""
+        chunks = [make_stored_chunk(index=index) for index in range(5)]
+        embeddings = [make_embedding(float(index)) for index in range(5)]
+
+        store.add_document(chunks, embeddings)
+
+        assert store.count() == 5
+        assert store.indexed_content_hashes() == {"a" * 64}
+
     def test_mismatched_lengths_are_rejected(self, store: LanceChunkStore) -> None:
         """Zipping these would pair a chunk with another chunk's vector."""
         with pytest.raises(ValueError, match="correspond one to one"):
-            store.add([make_stored_chunk()], [])
+            store.add_document([make_stored_chunk()], [])
 
     def test_a_wrong_width_vector_is_rejected(self, store: LanceChunkStore) -> None:
         wrong = Embedding(dense=(1.0, 2.0))
 
         with pytest.raises(ValueError, match="store holds 8-dimensional"):
-            store.add([make_stored_chunk()], [wrong])
+            store.add_document([make_stored_chunk()], [wrong])
 
     def test_stored_rows_survive_the_round_trip(self, store: LanceChunkStore) -> None:
         """The real test of the schema: through Arrow and back, unchanged."""
         chunk = make_stored_chunk("Smlouva o dilo", index=2, page=3)
-        store.add([chunk], [make_embedding(5.0)])
+        store.add_document([chunk], [make_embedding(5.0)])
 
         restored = record_to_chunk(store.to_records()[0])
 
@@ -284,7 +352,7 @@ class TestAdding:
 
     def test_vectors_survive_the_round_trip(self, store: LanceChunkStore) -> None:
         embedding = make_embedding(1.5)
-        store.add([make_stored_chunk()], [embedding])
+        store.add_document([make_stored_chunk()], [embedding])
 
         restored = record_to_embedding(store.to_records()[0])
 
@@ -299,17 +367,15 @@ class TestResumption:
 
     def test_reports_stored_document_hashes(self, store: LanceChunkStore) -> None:
         """Skipping documents already present is what makes a two-hour run survivable."""
-        store.add(
-            [make_stored_chunk(content_hash="a" * 64), make_stored_chunk(content_hash="b" * 64)],
-            [make_embedding(), make_embedding(2.0)],
-        )
+        store.add_document([make_stored_chunk(content_hash="a" * 64)], [make_embedding()])
+        store.add_document([make_stored_chunk(content_hash="b" * 64)], [make_embedding(2.0)])
 
         assert store.indexed_content_hashes() == {"a" * 64, "b" * 64}
 
     def test_a_document_appears_once_however_many_chunks_it_has(
         self, store: LanceChunkStore
     ) -> None:
-        store.add(
+        store.add_document(
             [make_stored_chunk(index=index) for index in range(3)],
             [make_embedding(float(index)) for index in range(3)],
         )
@@ -319,17 +385,15 @@ class TestResumption:
 
 class TestDeletion:
     def test_deletes_one_document_version(self, store: LanceChunkStore) -> None:
-        store.add(
-            [make_stored_chunk(content_hash="a" * 64), make_stored_chunk(content_hash="b" * 64)],
-            [make_embedding(), make_embedding(2.0)],
-        )
+        store.add_document([make_stored_chunk(content_hash="a" * 64)], [make_embedding()])
+        store.add_document([make_stored_chunk(content_hash="b" * 64)], [make_embedding(2.0)])
 
         store.delete_document("a" * 64)
 
         assert store.indexed_content_hashes() == {"b" * 64}
 
     def test_deletes_every_chunk_of_that_document(self, store: LanceChunkStore) -> None:
-        store.add(
+        store.add_document(
             [make_stored_chunk(index=index) for index in range(4)],
             [make_embedding(float(index)) for index in range(4)],
         )
@@ -340,12 +404,11 @@ class TestDeletion:
 
     def test_deletes_by_corpus_path(self, store: LanceChunkStore) -> None:
         """An edited file's old chunks must go, whatever version produced them."""
-        store.add(
-            [
-                make_stored_chunk(path="a.pdf", content_hash="a" * 64),
-                make_stored_chunk(path="b.pdf", content_hash="b" * 64),
-            ],
-            [make_embedding(), make_embedding(2.0)],
+        store.add_document(
+            [make_stored_chunk(path="a.pdf", content_hash="a" * 64)], [make_embedding()]
+        )
+        store.add_document(
+            [make_stored_chunk(path="b.pdf", content_hash="b" * 64)], [make_embedding(2.0)]
         )
 
         store.delete_by_path("a.pdf")
@@ -354,46 +417,16 @@ class TestDeletion:
 
     def test_a_path_containing_an_apostrophe_is_handled(self, store: LanceChunkStore) -> None:
         """Real filenames contain apostrophes, and this builds a SQL predicate."""
-        store.add(
-            [make_stored_chunk(path="Tom's file.pdf"), make_stored_chunk(path="other.pdf")],
-            [make_embedding(), make_embedding(2.0)],
+        store.add_document(
+            [make_stored_chunk(path="Tom's file.pdf", content_hash="a" * 64)], [make_embedding()]
+        )
+        store.add_document(
+            [make_stored_chunk(path="other.pdf", content_hash="b" * 64)], [make_embedding(2.0)]
         )
 
         store.delete_by_path("Tom's file.pdf")
 
         assert [row["relative_path"] for row in store.to_records()] == ["other.pdf"]
-
-
-class TestBatching:
-    def test_splits_into_aligned_slices(self) -> None:
-        chunks = [make_stored_chunk(index=index) for index in range(5)]
-        embeddings = [make_embedding(float(index)) for index in range(5)]
-
-        batches = list(iter_batches(chunks, embeddings, 2))
-
-        assert [len(pair[0]) for pair in batches] == [2, 2, 1]
-        assert all(len(pair[0]) == len(pair[1]) for pair in batches)
-
-    def test_slices_stay_paired(self) -> None:
-        """A slice that misaligns the two lists would store the wrong vectors."""
-        chunks = [make_stored_chunk(index=index) for index in range(4)]
-        embeddings = [make_embedding(float(index)) for index in range(4)]
-
-        for chunk_slice, embedding_slice in iter_batches(chunks, embeddings, 3):
-            for chunk, embedding in zip(chunk_slice, embedding_slice, strict=True):
-                assert embedding.dense[0] == float(chunk.metadata.chunk_index)
-
-    def test_empty_input_yields_nothing(self) -> None:
-        assert list(iter_batches([], [], 4)) == []
-
-    @pytest.mark.parametrize("bad", [0, -1])
-    def test_non_positive_size_is_rejected(self, bad: int) -> None:
-        with pytest.raises(ValueError, match="size must be positive"):
-            list(iter_batches([], [], bad))
-
-    def test_mismatched_lengths_are_rejected(self) -> None:
-        with pytest.raises(ValueError, match="correspond one to one"):
-            list(iter_batches([make_stored_chunk()], [], 2))
 
 
 def test_a_naive_timestamp_from_arrow_is_restored_as_utc() -> None:
