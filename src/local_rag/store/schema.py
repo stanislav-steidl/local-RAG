@@ -22,6 +22,7 @@ is serialised, since its keys are not known ahead of time.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
@@ -32,8 +33,12 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 __all__ = [
+    "CHUNK_OVERLAP_KEY",
+    "CHUNK_SIZE_KEY",
     "EMBEDDING_DIMENSION_KEY",
     "EMBEDDING_MODEL_KEY",
+    "PROVENANCE_LABELS",
+    "IndexProvenance",
     "build_schema",
     "chunk_id",
     "record_to_chunk",
@@ -41,10 +46,26 @@ __all__ = [
     "to_record",
 ]
 
-#: Arrow schema metadata keys recording which embedder built a table. Bytes,
-#: because that is what Arrow metadata holds.
+#: Arrow schema metadata keys recording how a table's rows were produced.
+#: Bytes, because that is what Arrow metadata holds.
+#:
+#: Every input that determines the stored rows belongs here. The embedder
+#: decides what the vectors mean; the chunking settings decide where one row
+#: ends and the next begins. Neither is visible in a document's content hash,
+#: so resumption would skip documents that ought to be rebuilt if either
+#: changed without being recorded.
 EMBEDDING_MODEL_KEY = b"local_rag.embedding_model"
 EMBEDDING_DIMENSION_KEY = b"local_rag.embedding_dimension"
+CHUNK_SIZE_KEY = b"local_rag.chunk_size"
+CHUNK_OVERLAP_KEY = b"local_rag.chunk_overlap"
+
+#: Human names for those keys, so a mismatch can say which setting differs.
+PROVENANCE_LABELS = {
+    EMBEDDING_MODEL_KEY: "embedder",
+    EMBEDDING_DIMENSION_KEY: "dimension",
+    CHUNK_SIZE_KEY: "chunk_size",
+    CHUNK_OVERLAP_KEY: "chunk_overlap",
+}
 
 
 def chunk_id(content_hash: str, chunk_index: int) -> str:
@@ -65,32 +86,71 @@ def chunk_id(content_hash: str, chunk_index: int) -> str:
     return f"{content_hash}:{chunk_index}"
 
 
-def build_schema(dimension: int, model_id: str) -> pa.Schema:
-    """Describe the table layout for a given embedder.
+@dataclass(frozen=True, slots=True)
+class IndexProvenance:
+    """Everything that determines what rows an index holds.
 
-    Both the width and the model identity are recorded. Width alone does not
-    identify an embedding model: two different models can produce 1024-wide
-    vectors that mean entirely different things, and mixing them in one table
-    yields a store whose similarity scores compare incomparable spaces while
-    every structural check passes. The identity is carried in the schema's
-    Arrow metadata, which LanceDB preserves across reopen.
+    Grouped rather than passed separately because they share one purpose:
+    resumption treats a document's content hash as standing for the rows it
+    produced, and that only holds while none of these have changed. None of
+    them appears in the hash, so each has to be recorded and checked, and a new
+    one being added later should not mean a new constructor argument in three
+    places.
+
+    Attributes:
+        model_id: Identifier of the embedder. Vector width is structural
+            compatibility, not identity — two models can both emit 1024-wide
+            vectors occupying entirely different spaces.
+        dimension: Width of the dense vectors.
+        chunk_size: Chunk length the rows were split at.
+        chunk_overlap: Overlap the rows were split with.
+    """
+
+    model_id: str
+    dimension: int
+    chunk_size: int
+    chunk_overlap: int
+
+    def __post_init__(self) -> None:
+        """Reject settings that could not have produced a coherent index."""
+        if not self.model_id:
+            raise ValueError("model_id must not be empty")
+        if self.dimension <= 0:
+            raise ValueError(f"dimension must be positive, got {self.dimension}")
+        if self.chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
+        if not 0 <= self.chunk_overlap < self.chunk_size:
+            raise ValueError(
+                f"chunk_overlap must be non-negative and smaller than chunk_size, "
+                f"got {self.chunk_overlap} with chunk_size {self.chunk_size}"
+            )
+
+    def as_metadata(self) -> dict[bytes, bytes]:
+        """Render as Arrow schema metadata, which holds bytes."""
+        return {
+            EMBEDDING_MODEL_KEY: self.model_id.encode(),
+            EMBEDDING_DIMENSION_KEY: str(self.dimension).encode(),
+            CHUNK_SIZE_KEY: str(self.chunk_size).encode(),
+            CHUNK_OVERLAP_KEY: str(self.chunk_overlap).encode(),
+        }
+
+
+def build_schema(provenance: IndexProvenance) -> pa.Schema:
+    """Describe the table layout, recording how its rows were produced.
+
+    The provenance is written into the schema's Arrow metadata, which LanceDB
+    preserves across reopen, so an index can say whether it was built the way
+    the current configuration would build it.
 
     Args:
-        dimension: Length of the dense vectors to be stored.
-        model_id: Identifier of the embedder that produces them.
+        provenance: Settings the rows were produced with.
 
     Returns:
         The Arrow schema for the chunk table.
-
-    Raises:
-        ValueError: If ``dimension`` is not positive or ``model_id`` is empty.
     """
     import pyarrow as pa  # noqa: PLC0415  # optional dependency, imported on use
 
-    if dimension <= 0:
-        raise ValueError(f"dimension must be positive, got {dimension}")
-    if not model_id:
-        raise ValueError("model_id must not be empty")
+    dimension = provenance.dimension
 
     return pa.schema(
         [
@@ -121,10 +181,7 @@ def build_schema(dimension: int, model_id: str) -> pa.Schema:
             # whose keys are not known in advance, so it cannot be columns.
             pa.field("extra_json", pa.string(), nullable=False),
         ],
-        metadata={
-            EMBEDDING_MODEL_KEY: model_id.encode(),
-            EMBEDDING_DIMENSION_KEY: str(dimension).encode(),
-        },
+        metadata=provenance.as_metadata(),
     )
 
 

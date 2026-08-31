@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from local_rag.errors import optional_dependency
-from local_rag.store.schema import EMBEDDING_MODEL_KEY, build_schema, to_record
+from local_rag.store.schema import PROVENANCE_LABELS, build_schema, to_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from local_rag.embedding import Embedding
     from local_rag.models import Chunk
+    from local_rag.store.schema import IndexProvenance
 
 __all__ = ["DEFAULT_TABLE_NAME", "LanceChunkStore"]
 
@@ -55,32 +56,24 @@ class LanceChunkStore:
     def __init__(
         self,
         path: Path,
-        *,
-        dimension: int,
-        model_id: str,
+        provenance: IndexProvenance,
         table_name: str = DEFAULT_TABLE_NAME,
     ) -> None:
         """Open or create a store.
 
         Args:
             path: Directory holding the database.
-            dimension: Width of the dense vectors to be stored.
-            model_id: Identifier of the embedder producing them. Recorded at
-                creation and checked on reopen, because width alone does not
-                identify a model: two embedders can both emit 1024-wide vectors
-                that mean different things.
+            provenance: Settings the rows are produced with. Recorded when the
+                table is created and checked when it is reopened, because
+                resumption treats a content hash as standing for the rows a
+                document produced and none of these settings appear in it.
             table_name: Table to read and write.
 
         Raises:
-            ValueError: If ``dimension`` is not positive, ``model_id`` is
-                empty, or an existing table was built by a different embedder.
+            ValueError: If an existing table was built with different settings,
+                or has a schema this store cannot write.
             MissingDependencyError: If LanceDB is not installed.
         """
-        if dimension <= 0:
-            raise ValueError(f"dimension must be positive, got {dimension}")
-        if not model_id:
-            raise ValueError("model_id must not be empty")
-
         with optional_dependency(
             "lancedb",
             "the vector store requires LanceDB: pip install 'local-rag[store]'",
@@ -88,13 +81,12 @@ class LanceChunkStore:
             import lancedb  # noqa: PLC0415  # optional dependency, imported on use
 
         self._path = path
-        self._dimension = dimension
-        self._model_id = model_id
+        self._provenance = provenance
         self._table_name = table_name
         self._connection = lancedb.connect(str(path))
 
         # Open first, create only on a genuine absence. Creating with
-        # `exist_ok` instead would surface a width mismatch as LanceDB's own
+        # `exist_ok` instead would surface a mismatch as LanceDB's own
         # "schemas disagree", and catching that broadly would swallow
         # permission and I/O failures too.
         try:
@@ -102,13 +94,11 @@ class LanceChunkStore:
         except ValueError as error:
             if _TABLE_NOT_FOUND not in str(error).lower():
                 raise
-            self._table = self._connection.create_table(
-                table_name, schema=build_schema(dimension, model_id)
-            )
-            logger.debug("Created table %r in %s for %s", table_name, path, model_id)
+            self._table = self._connection.create_table(table_name, schema=build_schema(provenance))
+            logger.debug("Created table %r in %s for %s", table_name, path, provenance.model_id)
         else:
             self._check_schema()
-            self._check_embedder()
+            self._check_provenance()
 
     def _check_schema(self) -> None:
         """Reject an existing table this store cannot write to.
@@ -124,14 +114,14 @@ class LanceChunkStore:
                 does not have the columns this store writes.
         """
         stored = self._table.schema
-        expected = build_schema(self._dimension, self._model_id)
+        expected = build_schema(self._provenance)
 
         if "vector" in stored.names:
             width = getattr(stored.field("vector").type, "list_size", None)
-            if width is not None and width != self._dimension:
+            if width is not None and width != self._provenance.dimension:
                 raise ValueError(
                     f"table {self._table_name!r} stores {width}-dimensional vectors but "
-                    f"{self._dimension} was requested; the embedding model has changed "
+                    f"{self._provenance.dimension} was requested; the embedding model has changed "
                     f"and the index must be rebuilt"
                 )
 
@@ -170,41 +160,48 @@ class LanceChunkStore:
                 f"({'; '.join(incompatible)}); it cannot be written by this store"
             )
 
-    def _check_embedder(self) -> None:
-        """Reject a table built by a different embedder.
+    def _check_provenance(self) -> None:
+        """Reject a table whose rows were produced with different settings.
 
-        Vector width is structural compatibility, not identity: two models can
-        both emit 1024-wide vectors that occupy entirely different spaces.
-        Writing one into a table of the other passes every structural check,
-        and then similarity scores compare things that are not comparable while
-        :meth:`indexed_content_hashes` reports the older documents as done, so
-        they are never re-embedded.
+        Resumption rests on a document's content hash standing for the rows it
+        produced, which only holds while the settings that turn a document into
+        rows are unchanged — and none of them appear in the hash. Either the
+        embedder or the chunking changing without a rebuild leaves
+        :meth:`indexed_content_hashes` reporting every stored document as done,
+        so the corpus is silently never reprocessed and the table ends up
+        holding rows built two incompatible ways.
 
         Raises:
-            ValueError: If the table records a different embedder, or none at
-                all.
+            ValueError: If the table was built with different settings, or
+                records none.
         """
-        metadata = self._table.schema.metadata or {}
-        stored = metadata.get(EMBEDDING_MODEL_KEY)
+        stored = self._table.schema.metadata or {}
 
-        if stored is None:
-            raise ValueError(
-                f"table {self._table_name!r} in {self._path} does not record which "
-                f"embedder built it, so its vectors cannot be shown to be comparable "
-                f"with {self._model_id!r}; rebuild the index"
-            )
+        for key, expected in self._provenance.as_metadata().items():
+            label = PROVENANCE_LABELS[key]
+            found = stored.get(key)
+            if found is None:
+                raise ValueError(
+                    f"table {self._table_name!r} in {self._path} does not record its "
+                    f"{label}, so its rows cannot be shown to match the current "
+                    f"configuration; rebuild the index"
+                )
+            if found != expected:
+                raise ValueError(
+                    f"table {self._table_name!r} was built with {label}="
+                    f"{found.decode()!r} but {expected.decode()!r} was requested; the "
+                    f"stored rows do not match and the index must be rebuilt"
+                )
 
-        if stored.decode() != self._model_id:
-            raise ValueError(
-                f"table {self._table_name!r} was built with {stored.decode()!r} but "
-                f"{self._model_id!r} was requested; their vectors are not comparable "
-                f"and the index must be rebuilt"
-            )
+    @property
+    def provenance(self) -> IndexProvenance:
+        """Settings the stored rows were produced with."""
+        return self._provenance
 
     @property
     def dimension(self) -> int:
         """Width of the dense vectors this store holds."""
-        return self._dimension
+        return self._provenance.dimension
 
     @property
     def path(self) -> Path:
@@ -273,12 +270,13 @@ class LanceChunkStore:
             {
                 embedding.dimension
                 for embedding in embeddings
-                if embedding.dimension != self._dimension
+                if embedding.dimension != self._provenance.dimension
             }
         )
         if wrong:
             raise ValueError(
-                f"store holds {self._dimension}-dimensional vectors but was given {wrong}"
+                f"store holds {self._provenance.dimension}-dimensional vectors "
+                f"but was given {wrong}"
             )
 
         rows = [
@@ -359,7 +357,7 @@ class LanceChunkStore:
         """Identify the table and where it lives."""
         return (
             f"{type(self).__name__}(path={str(self._path)!r}, "
-            f"table={self._table_name!r}, dimension={self._dimension})"
+            f"table={self._table_name!r}, dimension={self._provenance.dimension})"
         )
 
 

@@ -17,6 +17,7 @@ import pytest
 from local_rag.embedding import Embedding, SparseVector
 from local_rag.models import Chunk, ChunkMetadata, SourceType
 from local_rag.store import (
+    IndexProvenance,
     LanceChunkStore,
     build_schema,
     chunk_id,
@@ -37,6 +38,19 @@ import pyarrow as pa
 
 DIMENSION = 8
 MODEL_ID = "test/embedder"
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 200
+
+
+def provenance(**overrides: object) -> IndexProvenance:
+    """The settings these tests build indexes with."""
+    defaults: dict[str, object] = {
+        "model_id": MODEL_ID,
+        "dimension": DIMENSION,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+    }
+    return IndexProvenance(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
 def make_embedding(seed: float = 1.0, *, sparse: bool = True) -> Embedding:
@@ -71,7 +85,7 @@ def make_stored_chunk(
 @pytest.fixture
 def store(tmp_path: Path) -> LanceChunkStore:
     """An empty store on a temporary database."""
-    return LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id=MODEL_ID)
+    return LanceChunkStore(tmp_path / "index", provenance())
 
 
 class TestChunkId:
@@ -90,19 +104,19 @@ class TestChunkId:
 class TestSchema:
     def test_dense_vectors_are_fixed_width(self) -> None:
         """LanceDB indexes fixed-size lists; a variable list could not be indexed."""
-        field = build_schema(16, MODEL_ID).field("vector")
+        field = build_schema(provenance(dimension=16)).field("vector")
 
         assert field.type.list_size == 16
 
     def test_page_columns_are_nullable(self) -> None:
         """DOCX and plain text have no page numbers at all."""
-        schema = build_schema(4, MODEL_ID)
+        schema = build_schema(provenance(dimension=4))
 
         assert schema.field("page_number").nullable
         assert schema.field("page_count").nullable
 
     def test_provenance_columns_are_not_nullable(self) -> None:
-        schema = build_schema(4, MODEL_ID)
+        schema = build_schema(provenance(dimension=4))
 
         assert not schema.field("relative_path").nullable
         assert not schema.field("content_hash").nullable
@@ -110,16 +124,35 @@ class TestSchema:
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_dimension_is_rejected(self, bad: int) -> None:
         with pytest.raises(ValueError, match="dimension must be positive"):
-            build_schema(bad, MODEL_ID)
+            build_schema(provenance(dimension=bad))
 
     def test_an_empty_model_id_is_rejected(self) -> None:
         """An unnamed embedder cannot be checked against on reopen."""
         with pytest.raises(ValueError, match="model_id must not be empty"):
-            build_schema(4, "")
+            build_schema(provenance(model_id=""))
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_non_positive_chunk_size_is_rejected(self, bad: int) -> None:
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            build_schema(provenance(dimension=4, chunk_size=bad, chunk_overlap=0))
+
+    @pytest.mark.parametrize("bad", [-1, 100, 200])
+    def test_an_unusable_overlap_is_rejected(self, bad: int) -> None:
+        """Recording chunking that could not have produced the rows is worse than none."""
+        with pytest.raises(ValueError, match="chunk_overlap"):
+            build_schema(provenance(dimension=4, chunk_size=100, chunk_overlap=bad))
+
+    def test_the_chunking_settings_are_recorded(self) -> None:
+        metadata = build_schema(
+            provenance(dimension=4, chunk_size=1200, chunk_overlap=200)
+        ).metadata
+
+        assert metadata[b"local_rag.chunk_size"] == b"1200"
+        assert metadata[b"local_rag.chunk_overlap"] == b"200"
 
     def test_the_embedder_is_recorded_in_the_schema(self) -> None:
         """Reopening compares against this; width alone does not identify a model."""
-        metadata = build_schema(4, "BAAI/bge-m3").metadata
+        metadata = build_schema(provenance(dimension=4, model_id="BAAI/bge-m3")).metadata
 
         assert metadata[b"local_rag.embedding_model"] == b"BAAI/bge-m3"
         assert metadata[b"local_rag.embedding_dimension"] == b"4"
@@ -222,33 +255,40 @@ class TestStoreLifecycle:
     def test_reopening_keeps_the_data(self, tmp_path: Path) -> None:
         """Resumption across process restarts depends on exactly this."""
         path = tmp_path / "index"
-        first = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+        first = LanceChunkStore(path, provenance())
         first.add_document([make_stored_chunk()], [make_embedding()])
 
-        reopened = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+        reopened = LanceChunkStore(path, provenance())
 
         assert reopened.count() == 1
 
     def test_reopening_with_a_different_width_is_rejected(self, tmp_path: Path) -> None:
         """Otherwise this fails deep inside Arrow, far from the actual cause."""
         path = tmp_path / "index"
-        LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+        LanceChunkStore(path, provenance())
 
         with pytest.raises(ValueError, match="embedding model has changed"):
-            LanceChunkStore(path, dimension=DIMENSION + 1, model_id=MODEL_ID)
+            LanceChunkStore(path, provenance(dimension=DIMENSION + 1))
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_dimension_is_rejected(self, tmp_path: Path, bad: int) -> None:
         with pytest.raises(ValueError, match="dimension must be positive"):
-            LanceChunkStore(tmp_path / "index", dimension=bad, model_id=MODEL_ID)
+            LanceChunkStore(tmp_path / "index", provenance(dimension=bad))
 
     def test_repr_identifies_the_table(self, store: LanceChunkStore) -> None:
         assert "chunks" in repr(store)
         assert str(DIMENSION) in repr(store)
 
+    def test_exposes_the_provenance_it_was_opened_with(self, tmp_path: Path) -> None:
+        """An indexer needs these to decide what to re-embed."""
+        opened = LanceChunkStore(tmp_path / "index", provenance())
+
+        assert opened.provenance == provenance()
+        assert opened.provenance.chunk_size == CHUNK_SIZE
+
     def test_exposes_its_dimension_and_path(self, tmp_path: Path) -> None:
         path = tmp_path / "index"
-        opened = LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+        opened = LanceChunkStore(path, provenance())
 
         assert opened.dimension == DIMENSION
         assert opened.path == path
@@ -274,7 +314,7 @@ class TestStoreLifecycle:
         )
 
         with pytest.raises(ValueError, match="missing columns") as excinfo:
-            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+            LanceChunkStore(path, provenance())
 
         assert "embedding model has changed" not in str(excinfo.value)
 
@@ -287,41 +327,73 @@ class TestStoreLifecycle:
         already indexed, so they are never re-embedded.
         """
         path = tmp_path / "index"
-        LanceChunkStore(path, dimension=DIMENSION, model_id="first/model")
+        LanceChunkStore(path, provenance(model_id="first/model"))
 
-        with pytest.raises(ValueError, match="not comparable"):
-            LanceChunkStore(path, dimension=DIMENSION, model_id="second/model")
+        with pytest.raises(ValueError, match="built with embedder="):
+            LanceChunkStore(path, provenance(model_id="second/model"))
 
     def test_a_table_that_records_no_model_is_rejected(self, tmp_path: Path) -> None:
         """Unverifiable is not the same as compatible."""
         path = tmp_path / "index"
         connection = lancedb.connect(str(path))
         connection.create_table(
-            "chunks", schema=build_schema(DIMENSION, MODEL_ID).remove_metadata()
+            "chunks",
+            schema=build_schema(provenance()).remove_metadata(),
         )
 
-        with pytest.raises(ValueError, match="does not record which embedder"):
-            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+        with pytest.raises(ValueError, match="does not record its embedder"):
+            LanceChunkStore(path, provenance())
+
+    @pytest.mark.parametrize(
+        ("size", "overlap"), [(CHUNK_SIZE + 100, CHUNK_OVERLAP), (CHUNK_SIZE, CHUNK_OVERLAP + 50)]
+    )
+    def test_a_table_built_with_different_chunking_is_rejected(
+        self, tmp_path: Path, size: int, overlap: int
+    ) -> None:
+        """Chunk settings decide the rows, and never appear in a content hash.
+
+        Without this, changing chunk_size would leave every stored document
+        reported as done, so the corpus is silently never re-split and the
+        table keeps rows built two different ways.
+        """
+        path = tmp_path / "index"
+        LanceChunkStore(path, provenance())
+
+        with pytest.raises(ValueError, match="must be rebuilt"):
+            LanceChunkStore(path, provenance(chunk_size=size, chunk_overlap=overlap))
+
+    def test_unchanged_chunking_reopens_normally(self, tmp_path: Path) -> None:
+        """The check must not stand in the way of the resumption it protects."""
+        path = tmp_path / "index"
+        first = LanceChunkStore(path, provenance())
+        first.add_document([make_stored_chunk()], [make_embedding()])
+
+        reopened = LanceChunkStore(path, provenance())
+
+        assert reopened.indexed_content_hashes() == {"a" * 64}
 
     def test_an_empty_model_id_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="model_id must not be empty"):
-            LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id="")
+            LanceChunkStore(tmp_path / "index", provenance(model_id=""))
 
     def test_a_column_of_the_wrong_type_is_rejected(self, tmp_path: Path) -> None:
         """Matching names are not compatibility; this would fail on first write."""
         path = tmp_path / "index"
         fields = [
             pa.field("text", pa.int64()) if field.name == "text" else field
-            for field in build_schema(DIMENSION, MODEL_ID)
+            for field in build_schema(provenance())
         ]
         connection = lancedb.connect(str(path))
         connection.create_table(
             "chunks",
-            schema=pa.schema(fields, metadata=build_schema(DIMENSION, MODEL_ID).metadata),
+            schema=pa.schema(
+                fields,
+                metadata=build_schema(provenance()).metadata,
+            ),
         )
 
         with pytest.raises(ValueError, match="incompatible columns"):
-            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+            LanceChunkStore(path, provenance())
 
     def test_a_column_with_the_wrong_nullability_is_rejected(self, tmp_path: Path) -> None:
         """Nullability is separate from type in Arrow, and equally fatal.
@@ -331,7 +403,7 @@ class TestStoreLifecycle:
         write, which is exactly the late failure this check exists to prevent.
         """
         path = tmp_path / "index"
-        expected = build_schema(DIMENSION, MODEL_ID)
+        expected = build_schema(provenance())
         fields = [
             (
                 pa.field(field.name, field.type, nullable=False)
@@ -344,7 +416,7 @@ class TestStoreLifecycle:
         connection.create_table("chunks", schema=pa.schema(fields, metadata=expected.metadata))
 
         with pytest.raises(ValueError, match="nullable"):
-            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+            LanceChunkStore(path, provenance())
 
     def test_the_recorded_embedder_survives_a_real_reopen(self, tmp_path: Path) -> None:
         """The model check is worthless if LanceDB does not persist the metadata.
@@ -353,7 +425,7 @@ class TestStoreLifecycle:
         database this store actually depends on.
         """
         path = tmp_path / "index"
-        LanceChunkStore(path, dimension=DIMENSION, model_id="BAAI/bge-m3")
+        LanceChunkStore(path, provenance(model_id="BAAI/bge-m3"))
 
         reopened = lancedb.connect(str(path)).open_table("chunks")
 
@@ -377,7 +449,7 @@ class TestStoreLifecycle:
         monkeypatch.setattr(lancedb, "connect", lambda _uri: RefusingConnection())
 
         with pytest.raises(ValueError, match="Permission denied"):
-            LanceChunkStore(tmp_path / "index", dimension=DIMENSION, model_id=MODEL_ID)
+            LanceChunkStore(tmp_path / "index", provenance())
 
     def test_a_foreign_table_is_reported_clearly(self, tmp_path: Path) -> None:
         """Pointing at someone else's database should say so, not raise KeyError.
@@ -390,7 +462,7 @@ class TestStoreLifecycle:
         connection.create_table("chunks", schema=pa.schema([pa.field("x", pa.int32())]))
 
         with pytest.raises(ValueError, match="was not created by this store"):
-            LanceChunkStore(path, dimension=DIMENSION, model_id=MODEL_ID)
+            LanceChunkStore(path, provenance())
 
 
 class TestAdding:

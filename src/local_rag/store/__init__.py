@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from local_rag.store.lance import DEFAULT_TABLE_NAME, LanceChunkStore
 from local_rag.store.schema import (
+    IndexProvenance,
     build_schema,
     chunk_id,
     record_to_chunk,
@@ -18,6 +19,7 @@ from local_rag.store.schema import (
 
 __all__ = [
     "DEFAULT_TABLE_NAME",
+    "IndexProvenance",
     "LanceChunkStore",
     "build_schema",
     "chunk_id",
