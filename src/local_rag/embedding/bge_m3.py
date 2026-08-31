@@ -104,14 +104,17 @@ class BgeM3Embedder(Embedder):
         so raising or lowering it produces different vectors for the same text
         while the model name stays put. An index keyed on the name alone would
         report every stored document as current and never re-embed it.
+
+        ``use_fp16`` belongs here for the same reason — half precision changes
+        the arithmetic, so the vectors differ. Note that when it is left to
+        default, the answer follows the device actually resolved, so the same
+        configuration fingerprints differently on a CUDA machine and a CPU one.
+        Passing it explicitly keeps an index portable between them.
         """
-        effective_use_fp16 = self._use_fp16
-        if effective_use_fp16 is None:
-            effective_use_fp16 = self._resolve_device().startswith("cuda")
-        return (
-            f"{self._model_id}@max_length={self._max_length}"
-            f"@use_fp16={effective_use_fp16}"
-        )
+        use_fp16 = self._use_fp16
+        if use_fp16 is None:
+            use_fp16 = self._resolve_device().startswith("cuda")
+        return f"{self._model_id}@max_length={self._max_length}@use_fp16={use_fp16}"
 
     @property
     def max_length(self) -> int:

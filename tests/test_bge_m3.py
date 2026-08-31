@@ -74,6 +74,25 @@ class TestCapabilities:
         )
         assert "BAAI/bge-m3" in BgeM3Embedder().fingerprint
 
+    @pytest.mark.parametrize("requested", [True, False])
+    def test_an_explicit_fp16_choice_reaches_the_fingerprint(self, requested: bool) -> None:
+        """Half precision changes the arithmetic, so the vectors differ."""
+        assert f"use_fp16={requested}" in BgeM3Embedder(use_fp16=requested).fingerprint
+
+    def test_a_defaulted_fp16_follows_the_resolved_device(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Left to default it tracks the device, so the same settings differ by machine.
+
+        Worth pinning down: an index built on a CUDA box does not match one
+        built on a CPU box unless use_fp16 is passed explicitly.
+        """
+        monkeypatch.setitem(sys.modules, "torch", fake_torch(cuda_available=True))
+        assert "use_fp16=True" in BgeM3Embedder().fingerprint
+
+        monkeypatch.setitem(sys.modules, "torch", fake_torch(cuda_available=False))
+        assert "use_fp16=False" in BgeM3Embedder().fingerprint
+
     def test_max_length_defaults_well_below_the_model_ceiling(self) -> None:
         """8192 would reserve memory for capacity our chunk size never uses."""
         assert BgeM3Embedder().max_length == 1024
