@@ -91,8 +91,8 @@ class LanceChunkStore:
         # permission and I/O failures too.
         try:
             self._table = self._connection.open_table(table_name)
-        except ValueError as error:
-            if _TABLE_NOT_FOUND not in str(error).lower():
+        except (FileNotFoundError, ValueError) as error:
+            if isinstance(error, ValueError) and _TABLE_NOT_FOUND not in str(error).lower():
                 raise
             self._table = self._connection.create_table(table_name, schema=build_schema(provenance))
             logger.debug(
