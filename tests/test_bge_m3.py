@@ -70,7 +70,12 @@ class TestCapabilities:
         document as current and never re-embed it after this changed.
         """
         assert (
-            BgeM3Embedder(max_length=512).fingerprint != BgeM3Embedder(max_length=1024).fingerprint
+            BgeM3Embedder(max_length=512).fingerprint
+            != BgeM3Embedder(max_length=1024).fingerprint
+        )
+        assert (
+            BgeM3Embedder(use_fp16=True).fingerprint
+            != BgeM3Embedder(use_fp16=False).fingerprint
         )
         assert "BAAI/bge-m3" in BgeM3Embedder().fingerprint
 
