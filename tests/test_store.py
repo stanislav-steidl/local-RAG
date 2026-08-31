@@ -9,6 +9,7 @@ synthetic, so no model is loaded and the suite stays fast.
 from __future__ import annotations
 
 import json
+import zoneinfo
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -86,6 +87,16 @@ def make_stored_chunk(
 def store(tmp_path: Path) -> LanceChunkStore:
     """An empty store on a temporary database."""
     return LanceChunkStore(tmp_path / "index", provenance())
+
+
+def test_the_timezone_database_is_available() -> None:
+    """Arrow resolves the schema's UTC timestamps through zoneinfo.
+
+    Windows ships no IANA database, so without the tzdata dependency every read
+    of the table raises ArrowInvalid — which passed locally, where tzdata had
+    arrived transitively, and failed only on a clean Windows runner.
+    """
+    assert zoneinfo.ZoneInfo("UTC") is not None
 
 
 class TestChunkId:

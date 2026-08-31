@@ -54,6 +54,14 @@ store = [
     "lancedb>=0.37",
     "pyarrow>=16.0",
     "numpy>=1.26",
+    # The schema stores timezone-aware timestamps, and Arrow resolves the zone
+    # through zoneinfo, which needs an IANA database. Windows ships none, so
+    # without this every read of the table raises "The zoneinfo module or pytz
+    # package must be installed". Declared unconditionally rather than behind a
+    # Windows marker: minimal container images lack the system database too,
+    # and a dependency that is present everywhere cannot be absent on the one
+    # platform nobody tested.
+    "tzdata>=2024.1",
 ]
 # OCR for scanned PDFs and photographed documents.
 ocr = [
