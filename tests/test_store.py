@@ -32,10 +32,8 @@ from .conftest import make_document_metadata
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytest.importorskip("lancedb", reason="needs the store extra")
-
-import lancedb
-import pyarrow as pa
+lancedb = pytest.importorskip("lancedb", reason="needs the store extra")
+pa = pytest.importorskip("pyarrow", reason="needs the store extra")
 
 DIMENSION = 8
 MODEL_ID = "test/embedder@max_length=512"
