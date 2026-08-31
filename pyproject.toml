@@ -46,7 +46,12 @@ embeddings = [
 ]
 # Vector storage and hybrid retrieval.
 store = [
-    "lancedb>=0.13",
+    # 0.13 was a guess from the original scaffold and does not hold: its
+    # open_table raises FileNotFoundError rather than ValueError for an absent
+    # table, and it predates merge_insert's when_not_matched_by_source_delete,
+    # which the store relies on to drop chunks a rewritten document no longer
+    # has. The floor is the version this was actually verified against.
+    "lancedb>=0.37",
     "pyarrow>=16.0",
     "numpy>=1.26",
 ]

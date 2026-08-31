@@ -95,7 +95,9 @@ class LanceChunkStore:
             if _TABLE_NOT_FOUND not in str(error).lower():
                 raise
             self._table = self._connection.create_table(table_name, schema=build_schema(provenance))
-            logger.debug("Created table %r in %s for %s", table_name, path, provenance.model_id)
+            logger.debug(
+                "Created table %r in %s for %s", table_name, path, provenance.embedder_fingerprint
+            )
         else:
             self._check_schema()
             self._check_provenance()
@@ -131,6 +133,20 @@ class LanceChunkStore:
                 f"table {self._table_name!r} in {self._path} is missing columns "
                 f"{missing}, so it was not created by this store; point at a different "
                 f"directory or table"
+            )
+
+        # Extra columns are a problem too, not merely untidy. The merge writes
+        # source rows sanitised against the target schema with update_all and
+        # insert_all, so a column this store does not know about is either
+        # overwritten with null or, if it is non-nullable, fails the first
+        # write. Accepting the table would be claiming it is writable when it
+        # is not.
+        unexpected = [name for name in stored.names if name not in expected.names]
+        if unexpected:
+            raise ValueError(
+                f"table {self._table_name!r} in {self._path} has columns this store does "
+                f"not write ({unexpected}); it would lose or reject their contents, so it "
+                f"was not created by this store"
             )
 
         # Names alone are not compatibility. A `text` column typed int64, or a
@@ -309,15 +325,18 @@ class LanceChunkStore:
         Returns:
             Every distinct ``content_hash`` in the table.
         """
-        if self.count() == 0:
-            return set()
-
         # Project a single column. `to_arrow()` would materialise every dense
         # and sparse vector merely to read a string, which on the multi-gigabyte
         # indexes this design targets means reading the whole index to answer a
-        # question about its keys. `limit(0)` means no limit; the default is 10,
-        # which would silently truncate.
-        projected = self._table.search(None).select(["content_hash"]).limit(0).to_arrow()
+        # question about its keys.
+        #
+        # The limit is the row count rather than 0 or omitted. LanceDB's default
+        # is 10, and `limit(0)` has not consistently meant "unbounded" across
+        # releases — where it does not, this returns ten hashes and every
+        # document beyond them is re-embedded on the next run, silently and at
+        # about six seconds a chunk.
+        rows = self.count()
+        projected = self._table.search(None).select(["content_hash"]).limit(rows).to_arrow()
         return {str(value) for value in projected.column("content_hash").to_pylist()}
 
     def delete_document(self, content_hash: str) -> None:

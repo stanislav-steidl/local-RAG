@@ -97,6 +97,17 @@ class BgeM3Embedder(Embedder):
         return self._model_id
 
     @property
+    def fingerprint(self) -> str:
+        """The model together with the settings that change its vectors.
+
+        ``max_length`` belongs here: it decides where the model stops reading,
+        so raising or lowering it produces different vectors for the same text
+        while the model name stays put. An index keyed on the name alone would
+        report every stored document as current and never re-embed it.
+        """
+        return f"{self._model_id}@max_length={self._max_length}"
+
+    @property
     def max_length(self) -> int:
         """Tokens kept per text before the model truncates."""
         return self._max_length

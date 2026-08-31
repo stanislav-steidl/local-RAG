@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 __all__ = [
     "CHUNK_OVERLAP_KEY",
     "CHUNK_SIZE_KEY",
+    "EMBEDDER_FINGERPRINT_KEY",
     "EMBEDDING_DIMENSION_KEY",
-    "EMBEDDING_MODEL_KEY",
     "PROVENANCE_LABELS",
     "IndexProvenance",
     "build_schema",
@@ -54,14 +54,14 @@ __all__ = [
 #: ends and the next begins. Neither is visible in a document's content hash,
 #: so resumption would skip documents that ought to be rebuilt if either
 #: changed without being recorded.
-EMBEDDING_MODEL_KEY = b"local_rag.embedding_model"
+EMBEDDER_FINGERPRINT_KEY = b"local_rag.embedder_fingerprint"
 EMBEDDING_DIMENSION_KEY = b"local_rag.embedding_dimension"
 CHUNK_SIZE_KEY = b"local_rag.chunk_size"
 CHUNK_OVERLAP_KEY = b"local_rag.chunk_overlap"
 
 #: Human names for those keys, so a mismatch can say which setting differs.
 PROVENANCE_LABELS = {
-    EMBEDDING_MODEL_KEY: "embedder",
+    EMBEDDER_FINGERPRINT_KEY: "embedder",
     EMBEDDING_DIMENSION_KEY: "dimension",
     CHUNK_SIZE_KEY: "chunk_size",
     CHUNK_OVERLAP_KEY: "chunk_overlap",
@@ -98,23 +98,26 @@ class IndexProvenance:
     places.
 
     Attributes:
-        model_id: Identifier of the embedder. Vector width is structural
-            compatibility, not identity — two models can both emit 1024-wide
-            vectors occupying entirely different spaces.
+        embedder_fingerprint: Identity of the embedder together with every
+            setting that changes its vectors, as reported by
+            :attr:`~local_rag.embedding.Embedder.fingerprint`. Not merely the
+            model name: vector width is structural compatibility rather than
+            identity, and a truncation length changes the vectors without
+            changing the name.
         dimension: Width of the dense vectors.
         chunk_size: Chunk length the rows were split at.
         chunk_overlap: Overlap the rows were split with.
     """
 
-    model_id: str
+    embedder_fingerprint: str
     dimension: int
     chunk_size: int
     chunk_overlap: int
 
     def __post_init__(self) -> None:
         """Reject settings that could not have produced a coherent index."""
-        if not self.model_id:
-            raise ValueError("model_id must not be empty")
+        if not self.embedder_fingerprint:
+            raise ValueError("embedder_fingerprint must not be empty")
         if self.dimension <= 0:
             raise ValueError(f"dimension must be positive, got {self.dimension}")
         if self.chunk_size <= 0:
@@ -128,7 +131,7 @@ class IndexProvenance:
     def as_metadata(self) -> dict[bytes, bytes]:
         """Render as Arrow schema metadata, which holds bytes."""
         return {
-            EMBEDDING_MODEL_KEY: self.model_id.encode(),
+            EMBEDDER_FINGERPRINT_KEY: self.embedder_fingerprint.encode(),
             EMBEDDING_DIMENSION_KEY: str(self.dimension).encode(),
             CHUNK_SIZE_KEY: str(self.chunk_size).encode(),
             CHUNK_OVERLAP_KEY: str(self.chunk_overlap).encode(),
@@ -251,8 +254,12 @@ def _dump_extra(extra: dict[str, Any], relative_path: str) -> str:
         ValueError: If any value is not JSON-native.
     """
     try:
-        return json.dumps(extra, sort_keys=True)
-    except TypeError as error:
+        # allow_nan=False because the default emits bare NaN and Infinity, which
+        # are not JSON and which no other reader would accept — the value would
+        # be stored, and fail on the way back out or in anything else reading
+        # the index.
+        return json.dumps(extra, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as error:
         raise ValueError(
             f"metadata 'extra' for {relative_path} holds a value JSON cannot represent "
             f"({error}); store JSON-native values so provenance survives unchanged"

@@ -175,6 +175,22 @@ class Embedder(ABC):
         """Whether this embedder also produces term weights."""
         return False
 
+    @property
+    def fingerprint(self) -> str:
+        """Identity of this embedder *and every setting that changes its output*.
+
+        An index records this so it can tell whether the vectors it holds are
+        the vectors the current configuration would produce. The model name
+        alone is not enough: a truncation length or a normalisation choice
+        changes the vectors without changing the model, and an index that
+        compared only the name would report its documents as already done and
+        never rebuild them.
+
+        Subclasses with such settings must include them. The default covers the
+        class alone, which is correct only for an embedder that has none.
+        """
+        return f"{type(self).__module__}.{type(self).__qualname__}"
+
     @abstractmethod
     def _embed_batch(self, texts: Sequence[str]) -> list[Embedding]:
         """Embed one batch.

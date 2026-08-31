@@ -353,6 +353,10 @@ class TestCapabilities:
         """Backends opt in to sparse rather than claiming it by default."""
         assert RecordingEmbedder().supports_sparse is False
 
+    def test_the_default_fingerprint_names_the_class(self) -> None:
+        """Correct only for an embedder with no output-changing settings."""
+        assert RecordingEmbedder().fingerprint.endswith("RecordingEmbedder")
+
     def test_dimension_is_reported(self) -> None:
         assert RecordingEmbedder(width=5).dimension == 5
 

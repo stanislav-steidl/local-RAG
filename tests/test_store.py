@@ -37,7 +37,7 @@ import lancedb
 import pyarrow as pa
 
 DIMENSION = 8
-MODEL_ID = "test/embedder"
+MODEL_ID = "test/embedder@max_length=512"
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 200
 
@@ -45,7 +45,7 @@ CHUNK_OVERLAP = 200
 def provenance(**overrides: object) -> IndexProvenance:
     """The settings these tests build indexes with."""
     defaults: dict[str, object] = {
-        "model_id": MODEL_ID,
+        "embedder_fingerprint": MODEL_ID,
         "dimension": DIMENSION,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
@@ -128,8 +128,8 @@ class TestSchema:
 
     def test_an_empty_model_id_is_rejected(self) -> None:
         """An unnamed embedder cannot be checked against on reopen."""
-        with pytest.raises(ValueError, match="model_id must not be empty"):
-            build_schema(provenance(model_id=""))
+        with pytest.raises(ValueError, match="embedder_fingerprint must not be empty"):
+            build_schema(provenance(embedder_fingerprint=""))
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_chunk_size_is_rejected(self, bad: int) -> None:
@@ -152,9 +152,11 @@ class TestSchema:
 
     def test_the_embedder_is_recorded_in_the_schema(self) -> None:
         """Reopening compares against this; width alone does not identify a model."""
-        metadata = build_schema(provenance(dimension=4, model_id="BAAI/bge-m3")).metadata
+        metadata = build_schema(
+            provenance(dimension=4, embedder_fingerprint="BAAI/bge-m3")
+        ).metadata
 
-        assert metadata[b"local_rag.embedding_model"] == b"BAAI/bge-m3"
+        assert metadata[b"local_rag.embedder_fingerprint"] == b"BAAI/bge-m3"
         assert metadata[b"local_rag.embedding_dimension"] == b"4"
 
 
@@ -188,8 +190,13 @@ class TestRecordConversion:
         assert record["sparse_indices"] == []
         assert record["sparse_values"] == []
 
-    def test_extra_metadata_survives(self) -> None:
-        """EXIF and GPS for the planned photo corpus would be lost otherwise."""
+    def test_extra_metadata_survives_the_database(self, store: LanceChunkStore) -> None:
+        """Through Arrow and LanceDB, not merely the two conversion helpers.
+
+        Composing to_record with record_to_chunk in memory would pass even if
+        the column were dropped from the schema, which is exactly the
+        regression this is meant to catch.
+        """
         chunk = Chunk(
             page_content="text",
             metadata=ChunkMetadata(
@@ -202,7 +209,8 @@ class TestRecordConversion:
             ),
         )
 
-        restored = record_to_chunk(to_record(chunk, make_embedding()))
+        store.add_document([chunk], [make_embedding()])
+        restored = record_to_chunk(store.to_records()[0])
 
         assert restored.metadata.document.extra == {"gps": [50.08, 14.44]}
         assert restored.metadata.document.source_type is SourceType.PHOTO
@@ -222,6 +230,27 @@ class TestRecordConversion:
             page_content="text",
             metadata=ChunkMetadata(
                 document=make_document_metadata(extra={"taken": datetime(2024, 3, 5, tzinfo=UTC)}),
+                chunk_index=0,
+                start_char=0,
+                end_char=4,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="JSON cannot represent"):
+            to_record(chunk, make_embedding())
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_metadata_is_rejected(self, bad: float) -> None:
+        """json.dumps emits bare NaN and Infinity, which are not JSON.
+
+        They would be stored happily and then fail for anything else reading
+        the index, so the promise to reject unrepresentable values has to cover
+        them too.
+        """
+        chunk = Chunk(
+            page_content="text",
+            metadata=ChunkMetadata(
+                document=make_document_metadata(extra={"score": bad}),
                 chunk_index=0,
                 start_char=0,
                 end_char=4,
@@ -327,10 +356,10 @@ class TestStoreLifecycle:
         already indexed, so they are never re-embedded.
         """
         path = tmp_path / "index"
-        LanceChunkStore(path, provenance(model_id="first/model"))
+        LanceChunkStore(path, provenance(embedder_fingerprint="first/model"))
 
         with pytest.raises(ValueError, match="built with embedder="):
-            LanceChunkStore(path, provenance(model_id="second/model"))
+            LanceChunkStore(path, provenance(embedder_fingerprint="second/model"))
 
     def test_a_table_that_records_no_model_is_rejected(self, tmp_path: Path) -> None:
         """Unverifiable is not the same as compatible."""
@@ -373,8 +402,8 @@ class TestStoreLifecycle:
         assert reopened.indexed_content_hashes() == {"a" * 64}
 
     def test_an_empty_model_id_is_rejected(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="model_id must not be empty"):
-            LanceChunkStore(tmp_path / "index", provenance(model_id=""))
+        with pytest.raises(ValueError, match="embedder_fingerprint must not be empty"):
+            LanceChunkStore(tmp_path / "index", provenance(embedder_fingerprint=""))
 
     def test_a_column_of_the_wrong_type_is_rejected(self, tmp_path: Path) -> None:
         """Matching names are not compatibility; this would fail on first write."""
@@ -425,12 +454,28 @@ class TestStoreLifecycle:
         database this store actually depends on.
         """
         path = tmp_path / "index"
-        LanceChunkStore(path, provenance(model_id="BAAI/bge-m3"))
+        LanceChunkStore(path, provenance(embedder_fingerprint="BAAI/bge-m3"))
 
         reopened = lancedb.connect(str(path)).open_table("chunks")
 
-        assert reopened.schema.metadata[b"local_rag.embedding_model"] == b"BAAI/bge-m3"
+        assert reopened.schema.metadata[b"local_rag.embedder_fingerprint"] == b"BAAI/bge-m3"
         assert reopened.schema.metadata[b"local_rag.embedding_dimension"] == str(DIMENSION).encode()
+
+    def test_a_table_with_an_extra_column_is_rejected(self, tmp_path: Path) -> None:
+        """The merge writes rows sanitised against the target schema.
+
+        A column this store does not know about is therefore overwritten with
+        null, or fails the first write if it is non-nullable. Accepting the
+        table would be claiming it is writable when it is not.
+        """
+        path = tmp_path / "index"
+        expected = build_schema(provenance())
+        fields = [*expected, pa.field("someone_elses_column", pa.string())]
+        connection = lancedb.connect(str(path))
+        connection.create_table("chunks", schema=pa.schema(fields, metadata=expected.metadata))
+
+        with pytest.raises(ValueError, match="does not write"):
+            LanceChunkStore(path, provenance())
 
     def test_an_unexpected_open_failure_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -626,6 +671,26 @@ class TestResumption:
         store.add_document([make_stored_chunk(content_hash="b" * 64)], [make_embedding(2.0)])
 
         assert store.indexed_content_hashes() == {"a" * 64, "b" * 64}
+
+    def test_reports_every_document_beyond_the_default_query_limit(
+        self, store: LanceChunkStore
+    ) -> None:
+        """LanceDB's query builder defaults to ten rows.
+
+        Relying on that default — or on `limit(0)` meaning unbounded, which has
+        not held across releases — would return ten hashes and leave every
+        further document re-embedded on the next run, silently and at about six
+        seconds a chunk.
+        """
+        expected = set()
+        for index in range(25):
+            content_hash = f"{index:064d}"
+            expected.add(content_hash)
+            store.add_document(
+                [make_stored_chunk(content_hash=content_hash)], [make_embedding(float(index))]
+            )
+
+        assert store.indexed_content_hashes() == expected
 
     def test_a_document_appears_once_however_many_chunks_it_has(
         self, store: LanceChunkStore
