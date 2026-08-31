@@ -105,7 +105,13 @@ class BgeM3Embedder(Embedder):
         while the model name stays put. An index keyed on the name alone would
         report every stored document as current and never re-embed it.
         """
-        return f"{self._model_id}@max_length={self._max_length}"
+        effective_use_fp16 = self._use_fp16
+        if effective_use_fp16 is None:
+            effective_use_fp16 = self._resolve_device().startswith("cuda")
+        return (
+            f"{self._model_id}@max_length={self._max_length}"
+            f"@use_fp16={effective_use_fp16}"
+        )
 
     @property
     def max_length(self) -> int:
