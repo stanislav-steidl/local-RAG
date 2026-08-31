@@ -1,0 +1,328 @@
+"""The columnar schema chunks are stored in, and conversion to and from it.
+
+LanceDB stores Arrow tables, so the nested Python objects the pipeline passes
+around have to be flattened into columns. Keeping that translation in one place
+means the store itself deals only in rows, and the flattening is testable
+without a database.
+
+Two choices shape the schema:
+
+*Deterministic row identity.* A chunk's id is derived from its document's
+content hash and its position, not generated. Re-indexing an unchanged file
+therefore produces the same ids, which is what lets an interrupted run resume
+rather than duplicate — and at roughly six seconds per chunk on CPU, resuming
+is not a refinement.
+
+*Metadata as columns, not a blob.* Arrow's columnar layout is the reason
+LanceDB was chosen over an index that only stores vectors: filtering by date or
+path stays cheap at multi-gigabyte scale. Only the open-ended ``extra`` mapping
+is serialised, since its keys are not known ahead of time.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC
+from typing import TYPE_CHECKING, Any
+
+from local_rag.embedding import Embedding, SparseVector
+from local_rag.models import Chunk, ChunkMetadata, DocumentMetadata, SourceType
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+__all__ = [
+    "CHUNK_OVERLAP_KEY",
+    "CHUNK_SIZE_KEY",
+    "EMBEDDER_FINGERPRINT_KEY",
+    "EMBEDDING_DIMENSION_KEY",
+    "PROVENANCE_LABELS",
+    "IndexProvenance",
+    "build_schema",
+    "chunk_id",
+    "record_to_chunk",
+    "record_to_embedding",
+    "to_record",
+]
+
+#: Arrow schema metadata keys recording how a table's rows were produced.
+#: Bytes, because that is what Arrow metadata holds.
+#:
+#: Every input that determines the stored rows belongs here. The embedder
+#: decides what the vectors mean; the chunking settings decide where one row
+#: ends and the next begins. Neither is visible in a document's content hash,
+#: so resumption would skip documents that ought to be rebuilt if either
+#: changed without being recorded.
+EMBEDDER_FINGERPRINT_KEY = b"local_rag.embedder_fingerprint"
+EMBEDDING_DIMENSION_KEY = b"local_rag.embedding_dimension"
+CHUNK_SIZE_KEY = b"local_rag.chunk_size"
+CHUNK_OVERLAP_KEY = b"local_rag.chunk_overlap"
+
+#: Human names for those keys, so a mismatch can say which setting differs.
+PROVENANCE_LABELS = {
+    EMBEDDER_FINGERPRINT_KEY: "embedder",
+    EMBEDDING_DIMENSION_KEY: "dimension",
+    CHUNK_SIZE_KEY: "chunk_size",
+    CHUNK_OVERLAP_KEY: "chunk_overlap",
+}
+
+
+def chunk_id(content_hash: str, chunk_index: int) -> str:
+    """Return the stable identity of one chunk.
+
+    Derived rather than generated, so re-indexing an unchanged document yields
+    the same ids and can replace its rows instead of duplicating them. The
+    content hash rather than the path, because a file that moves is the same
+    document while a file that changes is not.
+
+    Args:
+        content_hash: Digest of the source document's bytes.
+        chunk_index: Position of the chunk within that document.
+
+    Returns:
+        An identifier unique to this chunk of this version of this document.
+    """
+    return f"{content_hash}:{chunk_index}"
+
+
+@dataclass(frozen=True, slots=True)
+class IndexProvenance:
+    """Everything that determines what rows an index holds.
+
+    Grouped rather than passed separately because they share one purpose:
+    resumption treats a document's content hash as standing for the rows it
+    produced, and that only holds while none of these have changed. None of
+    them appears in the hash, so each has to be recorded and checked, and a new
+    one being added later should not mean a new constructor argument in three
+    places.
+
+    Attributes:
+        embedder_fingerprint: Identity of the embedder together with every
+            setting that changes its vectors, as reported by
+            :attr:`~local_rag.embedding.Embedder.fingerprint`. Not merely the
+            model name: vector width is structural compatibility rather than
+            identity, and a truncation length changes the vectors without
+            changing the name.
+        dimension: Width of the dense vectors.
+        chunk_size: Chunk length the rows were split at.
+        chunk_overlap: Overlap the rows were split with.
+    """
+
+    embedder_fingerprint: str
+    dimension: int
+    chunk_size: int
+    chunk_overlap: int
+
+    def __post_init__(self) -> None:
+        """Reject settings that could not have produced a coherent index."""
+        if not self.embedder_fingerprint:
+            raise ValueError("embedder_fingerprint must not be empty")
+        if self.dimension <= 0:
+            raise ValueError(f"dimension must be positive, got {self.dimension}")
+        if self.chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
+        if not 0 <= self.chunk_overlap < self.chunk_size:
+            raise ValueError(
+                f"chunk_overlap must be non-negative and smaller than chunk_size, "
+                f"got {self.chunk_overlap} with chunk_size {self.chunk_size}"
+            )
+
+    def as_metadata(self) -> dict[bytes, bytes]:
+        """Render as Arrow schema metadata, which holds bytes."""
+        return {
+            EMBEDDER_FINGERPRINT_KEY: self.embedder_fingerprint.encode(),
+            EMBEDDING_DIMENSION_KEY: str(self.dimension).encode(),
+            CHUNK_SIZE_KEY: str(self.chunk_size).encode(),
+            CHUNK_OVERLAP_KEY: str(self.chunk_overlap).encode(),
+        }
+
+
+def build_schema(provenance: IndexProvenance) -> pa.Schema:
+    """Describe the table layout, recording how its rows were produced.
+
+    The provenance is written into the schema's Arrow metadata, which LanceDB
+    preserves across reopen, so an index can say whether it was built the way
+    the current configuration would build it.
+
+    Args:
+        provenance: Settings the rows were produced with.
+
+    Returns:
+        The Arrow schema for the chunk table.
+    """
+    import pyarrow as pa  # noqa: PLC0415  # optional dependency, imported on use
+
+    dimension = provenance.dimension
+
+    return pa.schema(
+        [
+            pa.field("chunk_id", pa.string(), nullable=False),
+            pa.field("text", pa.string(), nullable=False),
+            # Fixed width: LanceDB builds its vector index from this, and a
+            # variable-length list could not be indexed.
+            pa.field("vector", pa.list_(pa.float32(), dimension), nullable=False),
+            # Sparse vectors are stored as parallel arrays rather than a map,
+            # matching how SparseVector already holds them and how a lexical
+            # scorer wants to read them.
+            pa.field("sparse_indices", pa.list_(pa.int32()), nullable=False),
+            pa.field("sparse_values", pa.list_(pa.float32()), nullable=False),
+            # Document provenance, one column each so filters stay cheap.
+            pa.field("relative_path", pa.string(), nullable=False),
+            pa.field("source_type", pa.string(), nullable=False),
+            pa.field("file_extension", pa.string(), nullable=False),
+            pa.field("size_bytes", pa.int64(), nullable=False),
+            pa.field("modified_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("content_hash", pa.string(), nullable=False),
+            pa.field("page_count", pa.int32(), nullable=True),
+            # Position within the document, enough to locate the chunk again.
+            pa.field("chunk_index", pa.int32(), nullable=False),
+            pa.field("start_char", pa.int32(), nullable=False),
+            pa.field("end_char", pa.int32(), nullable=False),
+            pa.field("page_number", pa.int32(), nullable=True),
+            # Open-ended metadata — EXIF and GPS for the planned photo corpus —
+            # whose keys are not known in advance, so it cannot be columns.
+            pa.field("extra_json", pa.string(), nullable=False),
+        ],
+        metadata=provenance.as_metadata(),
+    )
+
+
+def to_record(chunk: Chunk, embedding: Embedding) -> dict[str, Any]:
+    """Flatten a chunk and its embedding into one table row.
+
+    Args:
+        chunk: The chunk to store.
+        embedding: Its vectors. A dense-only embedding is stored with empty
+            sparse arrays, which read back as an empty :class:`SparseVector`.
+
+    Returns:
+        A row matching :func:`build_schema`.
+
+    Raises:
+        ValueError: If the document's ``extra`` mapping holds values JSON
+            cannot represent. Coercing them instead would let provenance change
+            type silently between what was stored and what comes back.
+
+    Note:
+        ``extra`` survives a round trip only for JSON-native values. A tuple is
+        stored and returned as a list, since JSON has one sequence type; the
+        mapping is otherwise unchanged.
+    """
+    document = chunk.metadata.document
+    sparse = embedding.sparse or SparseVector()
+
+    return {
+        "chunk_id": chunk_id(document.content_hash, chunk.metadata.chunk_index),
+        "text": chunk.page_content,
+        "vector": list(embedding.dense),
+        "sparse_indices": list(sparse.indices),
+        "sparse_values": list(sparse.values),
+        "relative_path": document.relative_path,
+        "source_type": document.source_type.value,
+        "file_extension": document.file_extension,
+        "size_bytes": document.size_bytes,
+        "modified_at": document.modified_at,
+        "content_hash": document.content_hash,
+        "page_count": document.page_count,
+        "chunk_index": chunk.metadata.chunk_index,
+        "start_char": chunk.metadata.start_char,
+        "end_char": chunk.metadata.end_char,
+        "page_number": chunk.metadata.page_number,
+        "extra_json": _dump_extra(document.extra, document.relative_path),
+    }
+
+
+def _dump_extra(extra: dict[str, Any], relative_path: str) -> str:
+    """Serialise a document's open-ended metadata, refusing to guess.
+
+    ``default=str`` would make anything serialisable, at the cost of turning a
+    datetime or a Decimal into a string that reads back as a string — the type
+    changing between store and retrieve, with nothing to indicate it happened.
+    An error at write time is recoverable; provenance that quietly changed type
+    is not detectable at all.
+
+    Args:
+        extra: The mapping to serialise.
+        relative_path: Document the mapping belongs to, for the error message.
+
+    Returns:
+        Its JSON representation, with keys sorted so equal mappings serialise
+        identically.
+
+    Raises:
+        ValueError: If any value is not JSON-native.
+    """
+    try:
+        # allow_nan=False because the default emits bare NaN and Infinity, which
+        # are not JSON and which no other reader would accept — the value would
+        # be stored, and fail on the way back out or in anything else reading
+        # the index.
+        return json.dumps(extra, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"metadata 'extra' for {relative_path} holds a value JSON cannot represent "
+            f"({error}); store JSON-native values so provenance survives unchanged"
+        ) from error
+
+
+def record_to_chunk(record: dict[str, Any]) -> Chunk:
+    """Rebuild a chunk from a stored row.
+
+    Retrieval returns rows, but the rest of the pipeline — citations above all —
+    speaks in chunks, so the flattening has to be reversible.
+
+    Args:
+        record: A row as returned by the store.
+
+    Returns:
+        The chunk it was built from.
+    """
+    modified_at = record["modified_at"]
+    if modified_at.tzinfo is None:
+        # Arrow may hand back a naive datetime even for a tz-aware column, and
+        # DocumentMetadata rejects those outright.
+        modified_at = modified_at.replace(tzinfo=UTC)
+
+    document = DocumentMetadata(
+        relative_path=record["relative_path"],
+        source_type=SourceType(record["source_type"]),
+        file_extension=record["file_extension"],
+        size_bytes=int(record["size_bytes"]),
+        modified_at=modified_at,
+        content_hash=record["content_hash"],
+        page_count=None if record["page_count"] is None else int(record["page_count"]),
+        extra=json.loads(record["extra_json"]),
+    )
+
+    return Chunk(
+        page_content=record["text"],
+        metadata=ChunkMetadata(
+            document=document,
+            chunk_index=int(record["chunk_index"]),
+            start_char=int(record["start_char"]),
+            end_char=int(record["end_char"]),
+            page_number=None if record["page_number"] is None else int(record["page_number"]),
+        ),
+    )
+
+
+def record_to_embedding(record: dict[str, Any]) -> Embedding:
+    """Rebuild an embedding from a stored row.
+
+    Args:
+        record: A row as returned by the store.
+
+    Returns:
+        The embedding it holds. Empty sparse arrays become an empty
+        :class:`SparseVector` rather than ``None``, since a row written by a
+        dense-only backend is indistinguishable from one whose terms were all
+        dropped.
+    """
+    return Embedding(
+        dense=tuple(float(value) for value in record["vector"]),
+        sparse=SparseVector(
+            indices=tuple(int(index) for index in record["sparse_indices"]),
+            values=tuple(float(value) for value in record["sparse_values"]),
+        ),
+    )
